@@ -11,8 +11,8 @@
 
 > [!IMPORTANT]
 > Vanta is under active development. The document and file-safety foundation is
-> functional, and v0.2 includes an early GPU-rendered desktop editor. Text can be
-> opened, edited, and saved, but essential editor interactions are still missing.
+> functional, and v0.3 begins the editing-workflow layer on top of the native
+> GPU editor. The application remains experimental and intentionally incomplete.
 
 ## Why Vanta?
 
@@ -42,9 +42,10 @@ Vanta starts with those failure modes instead of treating them as later polish.
 | **File safety** | UTF-8/BOM detection, line-ending inspection, content fingerprints, conflict-aware atomic saves, and permission preservation |
 | **Recovery** | Durable recovery records with discovery, validation, and removal APIs |
 | **CLI** | Headless file inspection for encoding, line endings, document size, and end position |
-| **Desktop** | Native winit/wgpu/glyphon window, advanced text shaping, keyboard and IME input, Unicode-scalar movement/deletion, dirty state, and conflict-aware save |
-| **Rendering** | Responsive GPU surface, resize and scale-factor handling, surface recovery, and monospace text layout |
-| **Correctness** | 18 deterministic and randomized tests covering edits, Unicode boundaries, history, saves, conflicts, recovery, and editor state |
+| **Desktop** | Native winit/wgpu/glyphon window, keyboard and IME input, grapheme editing, mouse/drag selection, scrolling, clipboard, dirty state, and conflict-aware save |
+| **Rendering** | GPU text plus caret/selection overlays, shaped-text hit-testing, resize and scale-factor handling, and surface recovery |
+| **Commands** | Stable IDs, metadata, contextual enablement, deterministic palette search, and built-in editor command dispatch |
+| **Correctness** | 24 deterministic and randomized tests covering edits, Unicode boundaries, history, saves, conflicts, recovery, editor state, and commands |
 
 ## Quick start
 
@@ -62,7 +63,7 @@ Inspect a UTF-8 text file with the headless CLI:
 cargo run -p vanta-cli -- inspect README.md
 ```
 
-Launch the v0.2 desktop editor with a file:
+Launch the v0.3 desktop editor with a file:
 
 ```bash
 cargo run -p vanta -- README.md
@@ -81,14 +82,18 @@ cargo run -p vanta
 | Text input / IME commit | Insert text at the logical cursor |
 | `Enter` | Insert a line feed |
 | `Tab` | Insert a tab |
-| `Backspace` | Delete the preceding Unicode scalar |
-| `Left` / `Right` | Move across Unicode scalar boundaries |
+| `Backspace` / `Delete` | Delete an extended grapheme or the active selection |
+| `Left` / `Right` | Move across extended grapheme boundaries |
+| `Shift+Left` / `Shift+Right` | Extend the selection |
+| Mouse click / drag | Place the caret or select shaped text |
+| Mouse wheel / trackpad | Scroll the text viewport |
+| `Cmd+A/C/X/V` / `Ctrl+A/C/X/V` | Select all, copy, cut, or paste |
 | `Cmd+S` / `Ctrl+S` | Save an existing file if it has not changed externally |
 
-The current window renders text but does not yet draw a caret or selection.
-Mouse interaction, vertical movement, scrolling, clipboard actions, undo/redo
-commands, file dialogs, Save As, and unsaved-close confirmation are not wired
-into the desktop UI yet. An untitled buffer therefore cannot currently be saved.
+Vertical movement, undo/redo commands, file dialogs, Save As, IME preedit
+display, accessibility semantics, and unsaved-close confirmation are not yet
+wired into the desktop UI. An untitled buffer therefore cannot currently be
+saved.
 
 ## How the core works
 
@@ -130,6 +135,7 @@ existing permissions, replace the destination, and synchronize its directory.
 ```text
 Vanta
 ├── crates/app        Native GPU-rendered desktop editor
+├── crates/commands   Command identities, metadata, enablement, and discovery
 ├── crates/document   Versioned text model and transaction semantics
 ├── crates/file-io    Safe loading, conflict-aware saves, and recovery journals
 └── crates/cli        Headless inspection and development harness
@@ -141,13 +147,13 @@ layers replaceable around a stable editing contract.
 
 ## Development status
 
-The project is implementing **v0.2: the first usable desktop-editor vertical
-slice**. The core and first window are in place; the current priorities are:
+The project is implementing **v0.3: editing workflow, workspaces, and
+navigation**. The current priorities are:
 
-1. Complete caret, selection, mouse, scrolling, and grapheme-aware interaction.
-2. Add clipboard, file dialogs, IME preedit display, and accessibility semantics.
-3. Connect recovery journaling and external file watching to the application lifecycle.
-4. Benchmark storage candidates without weakening the proven text contract.
+1. Add a command palette and configurable, context-aware keybindings.
+2. Implement workspace folders, file discovery, ignore rules, and quick open.
+3. Add vertical navigation, undo/redo dispatch, sessions, and split panes.
+4. Complete file dialogs, recovery lifecycle, accessibility, and IME preedit.
 
 ## Development
 
