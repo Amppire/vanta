@@ -32,7 +32,12 @@ release infrastructure, or speculative service boundaries yet.
 
 ## Run
 
+Vanta currently opens the new GPUI application shell:
+
 ```sh
 cargo run
 ```
+
+The previous implementation and its design archive remain available on the
+`codex/archive-pre-rewrite-2026-10-24` branch.
 
