@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 vanta-document = { path = "../document" }
+vanta-file-io = { path = "../file-io" }
 
 [lints]
 workspace = true

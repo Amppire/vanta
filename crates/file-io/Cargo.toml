@@ -1,0 +1,11 @@
+[package]
+name = "vanta-file-io"
+description = "Safe text loading, atomic saving, and recovery journals for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
