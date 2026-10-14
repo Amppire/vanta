@@ -11,8 +11,8 @@
 
 > [!IMPORTANT]
 > Vanta is under active development. The document and file-safety foundation is
-> functional, and v0.2 now has an early GPU-rendered desktop editor shell. It is
-> not yet a finished graphical editor.
+> functional, and v0.2 includes an early GPU-rendered desktop editor. Text can be
+> opened, edited, and saved, but essential editor interactions are still missing.
 
 ## Why Vanta?
 
@@ -42,8 +42,9 @@ Vanta starts with those failure modes instead of treating them as later polish.
 | **File safety** | UTF-8/BOM detection, line-ending inspection, content fingerprints, conflict-aware atomic saves, and permission preservation |
 | **Recovery** | Durable recovery records with discovery, validation, and removal APIs |
 | **CLI** | Headless file inspection for encoding, line endings, document size, and end position |
-| **Desktop** | Native winit/wgpu/glyphon window, advanced text shaping, basic input and IME commits, resize/device-loss handling, dirty state, and conflict-aware save |
-| **Correctness** | Deterministic and randomized tests covering edits, Unicode boundaries, history, saves, conflicts, and recovery |
+| **Desktop** | Native winit/wgpu/glyphon window, advanced text shaping, keyboard and IME input, Unicode-scalar movement/deletion, dirty state, and conflict-aware save |
+| **Rendering** | Responsive GPU surface, resize and scale-factor handling, surface recovery, and monospace text layout |
+| **Correctness** | 18 deterministic and randomized tests covering edits, Unicode boundaries, history, saves, conflicts, recovery, and editor state |
 
 ## Quick start
 
@@ -61,11 +62,33 @@ Inspect a UTF-8 text file with the headless CLI:
 cargo run -p vanta-cli -- inspect README.md
 ```
 
-Launch the v0.2 desktop shell with a file:
+Launch the v0.2 desktop editor with a file:
 
 ```bash
 cargo run -p vanta -- README.md
 ```
+
+You can also launch without a path to create an untitled buffer:
+
+```bash
+cargo run -p vanta
+```
+
+### Desktop controls
+
+| Input | Action |
+|---|---|
+| Text input / IME commit | Insert text at the logical cursor |
+| `Enter` | Insert a line feed |
+| `Tab` | Insert a tab |
+| `Backspace` | Delete the preceding Unicode scalar |
+| `Left` / `Right` | Move across Unicode scalar boundaries |
+| `Cmd+S` / `Ctrl+S` | Save an existing file if it has not changed externally |
+
+The current window renders text but does not yet draw a caret or selection.
+Mouse interaction, vertical movement, scrolling, clipboard actions, undo/redo
+commands, file dialogs, Save As, and unsaved-close confirmation are not wired
+into the desktop UI yet. An untitled buffer therefore cannot currently be saved.
 
 ## How the core works
 
@@ -106,11 +129,10 @@ existing permissions, replace the destination, and synchronize its directory.
 
 ```text
 Vanta
-├── crates/app        Native desktop application shell
+├── crates/app        Native GPU-rendered desktop editor
 ├── crates/document   Versioned text model and transaction semantics
 ├── crates/file-io    Safe loading, conflict-aware saves, and recovery journals
-├── crates/cli        Headless inspection and development harness
-└── docs/rfcs         Architectural decisions and behavioral contracts
+└── crates/cli        Headless inspection and development harness
 ```
 
 The filesystem layer stays separate from the document engine. This keeps the
@@ -119,17 +141,13 @@ layers replaceable around a stable editing contract.
 
 ## Development status
 
-The project is implementing **v0.2: the primary-platform editor vertical
-slice**. The current priorities are:
+The project is implementing **v0.2: the first usable desktop-editor vertical
+slice**. The core and first window are in place; the current priorities are:
 
 1. Complete caret, selection, mouse, scrolling, and grapheme-aware interaction.
 2. Add clipboard, file dialogs, IME preedit display, and accessibility semantics.
-3. Connect recovery journaling and external file watching to application lifecycle.
+3. Connect recovery journaling and external file watching to the application lifecycle.
 4. Benchmark storage candidates without weakening the proven text contract.
-
-See the [implementation plan](IMPLEMENTATION_PLAN.md) for the evidence-gated
-roadmap and the [text semantics RFC](docs/rfcs/001-text-semantics.md) for the
-current architectural contract.
 
 ## Development
 
