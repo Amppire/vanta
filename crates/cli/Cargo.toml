@@ -1,0 +1,14 @@
+[package]
+name = "vanta-cli"
+description = "Headless development harness for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+vanta-document = { path = "../document" }
+
+[lints]
+workspace = true
+
