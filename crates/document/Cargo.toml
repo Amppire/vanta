@@ -1,0 +1,11 @@
+[package]
+name = "vanta-document"
+description = "Versioned text document engine for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
