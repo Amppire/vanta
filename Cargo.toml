@@ -1,12 +1,12 @@
 [workspace]
-members = ["crates/cli", "crates/document"]
+members = ["crates/app", "crates/cli", "crates/document", "crates/file-io"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.85"
-version = "0.1.0"
+rust-version = "1.89"
+version = "0.2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

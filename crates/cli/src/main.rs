@@ -1,9 +1,9 @@
 use std::env;
 use std::error::Error;
-use std::fs;
 use std::path::Path;
 
 use vanta_document::{ByteOffset, Document};
+use vanta_file_io::load_text;
 
 fn main() {
     if let Err(error) = run() {
@@ -31,15 +31,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
-    let bytes = fs::read(path)?;
-    let text = std::str::from_utf8(&bytes).map_err(|error| {
-        format!(
-            "{} is not valid UTF-8 (first invalid byte near {}): {error}",
-            path.display(),
-            error.valid_up_to()
-        )
-    })?;
-    let document = Document::new(text);
+    let loaded = load_text(path)?;
+    let document = Document::new(loaded.text);
     let end = document.offset_to_point(ByteOffset(document.byte_len()))?;
 
     println!("path: {}", path.display());
@@ -47,5 +40,8 @@ fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
     println!("lines: {}", document.line_count());
     println!("version: {}", document.version().0);
     println!("end: {}:{}", end.line, end.byte_column);
+    println!("encoding: {:?}", loaded.format.encoding);
+    println!("line endings: {:?}", loaded.format.line_endings);
+    println!("final line ending: {}", loaded.format.has_final_line_ending);
     Ok(())
 }

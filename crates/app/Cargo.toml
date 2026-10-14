@@ -1,0 +1,18 @@
+[package]
+name = "vanta"
+description = "Vanta desktop editor"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+glyphon = "0.12.0"
+pollster = "0.4.0"
+vanta-document = { path = "../document" }
+vanta-file-io = { path = "../file-io" }
+wgpu = "30.0.0"
+winit = "0.30.12"
+
+[lints]
+workspace = true
