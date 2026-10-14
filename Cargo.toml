@@ -1,0 +1,16 @@
+[package]
+name = "vanta"
+description = "A native text editor built from the editing experience outward"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.96"
+version = "0.1.0"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
