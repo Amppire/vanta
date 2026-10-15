@@ -13,6 +13,25 @@ pub const WORKBENCH_NEXT_TAB: &str = "workbench.next_tab";
 pub const VIEW_TOGGLE_SPLIT: &str = "view.toggle_split";
 pub const VIEW_TOGGLE_SIDEBAR: &str = "view.toggle_sidebar";
 pub const WORKBENCH_COMMAND_PALETTE: &str = "workbench.command_palette";
+pub const LANGUAGE_TOGGLE: &str = "language.toggle";
+pub const LANGUAGE_CONFIGURE: &str = "language.configure";
+pub const LANGUAGE_COMPLETION: &str = "language.completion";
+pub const LANGUAGE_HOVER: &str = "language.hover";
+pub const LANGUAGE_DEFINITION: &str = "language.definition";
+pub const LANGUAGE_REFERENCES: &str = "language.references";
+pub const LANGUAGE_DOCUMENT_SYMBOLS: &str = "language.document_symbols";
+pub const LANGUAGE_WORKSPACE_SYMBOLS: &str = "language.workspace_symbols";
+pub const LANGUAGE_RENAME: &str = "language.rename";
+pub const LANGUAGE_FORMAT: &str = "language.format";
+pub const LANGUAGE_CODE_ACTIONS: &str = "language.code_actions";
+pub const LANGUAGE_SHOW_STATUS: &str = "language.show_status";
+pub const LANGUAGE_SHOW_PROBLEMS: &str = "language.show_problems";
+pub const EXTENSIONS_INSPECT: &str = "extensions.inspect";
+pub const EXTENSIONS_INSTALL_OFFLINE: &str = "extensions.install_offline";
+pub const EXTENSIONS_TOGGLE: &str = "extensions.toggle";
+pub const EXTENSIONS_ROLLBACK: &str = "extensions.rollback";
+pub const PROFILE_EXPORT: &str = "profile.export";
+pub const PROFILE_IMPORT: &str = "profile.import";
 pub const EDITOR_SELECT_ALL: &str = "editor.select_all";
 pub const EDITOR_COPY: &str = "editor.copy";
 pub const EDITOR_CUT: &str = "editor.cut";
@@ -30,6 +49,7 @@ pub const EDITOR_REDO: &str = "editor.redo";
 pub const EDITOR_INSERT_NEWLINE: &str = "editor.insert_newline";
 pub const EDITOR_INSERT_TAB: &str = "editor.insert_tab";
 
+#[allow(clippy::too_many_lines)]
 pub fn built_in_registry() -> Result<CommandRegistry, CommandError> {
     let mut registry = CommandRegistry::new();
     register(
@@ -77,6 +97,63 @@ pub fn built_in_registry() -> Result<CommandRegistry, CommandError> {
         "View",
         CommandTarget::Application,
     )?;
+    for (id, title, category) in [
+        (LANGUAGE_TOGGLE, "Toggle Language Intelligence", "Language"),
+        (
+            LANGUAGE_CONFIGURE,
+            "Configure Language Server Executable",
+            "Language",
+        ),
+        (LANGUAGE_COMPLETION, "Show Completions", "Language"),
+        (LANGUAGE_HOVER, "Show Hover", "Language"),
+        (LANGUAGE_DEFINITION, "Go to Definition", "Language"),
+        (LANGUAGE_REFERENCES, "Find References", "Language"),
+        (
+            LANGUAGE_DOCUMENT_SYMBOLS,
+            "Show Document Symbols",
+            "Language",
+        ),
+        (
+            LANGUAGE_WORKSPACE_SYMBOLS,
+            "Show Workspace Symbols",
+            "Language",
+        ),
+        (LANGUAGE_RENAME, "Rename Symbol", "Language"),
+        (LANGUAGE_FORMAT, "Format Document", "Language"),
+        (LANGUAGE_CODE_ACTIONS, "Show Code Actions", "Language"),
+        (
+            LANGUAGE_SHOW_STATUS,
+            "Show Language Server Status",
+            "Language",
+        ),
+        (LANGUAGE_SHOW_PROBLEMS, "Show Problems", "Language"),
+        (
+            EXTENSIONS_INSPECT,
+            "Inspect Extensions and Permissions",
+            "Extensions",
+        ),
+        (
+            EXTENSIONS_INSTALL_OFFLINE,
+            "Install Extension from Manifest",
+            "Extensions",
+        ),
+        (
+            EXTENSIONS_TOGGLE,
+            "Enable or Disable Extension",
+            "Extensions",
+        ),
+        (EXTENSIONS_ROLLBACK, "Roll Back Extension", "Extensions"),
+        (PROFILE_EXPORT, "Export Profile", "Profiles"),
+        (PROFILE_IMPORT, "Import Profile", "Profiles"),
+    ] {
+        register(
+            &mut registry,
+            id,
+            title,
+            category,
+            CommandTarget::Application,
+        )?;
+    }
     register(
         &mut registry,
         EDITOR_SELECT_ALL,

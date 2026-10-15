@@ -121,7 +121,27 @@ impl EditorModel {
     }
 
     #[must_use]
-    #[cfg(test)]
+    pub const fn version(&self) -> vanta_document::DocumentVersion {
+        self.document.version()
+    }
+
+    pub fn apply_external_transaction(
+        &mut self,
+        transaction: Transaction,
+    ) -> Result<(), vanta_document::DocumentError> {
+        self.document.apply(transaction)?;
+        let mut cursor = self.cursor.0.min(self.document.byte_len());
+        while !self.document.text().is_char_boundary(cursor) {
+            cursor = cursor.saturating_sub(1);
+        }
+        self.cursor = ByteOffset(cursor);
+        self.selection_anchor = self.cursor;
+        self.extra_cursors.clear();
+        self.preferred_column = None;
+        Ok(())
+    }
+
+    #[must_use]
     pub const fn cursor(&self) -> ByteOffset {
         self.cursor
     }

@@ -7,6 +7,8 @@ pub struct CommandPalette {
     selected: usize,
     files: Option<Vec<PathBuf>>,
     search_input: bool,
+    info: Option<String>,
+    prompt: Option<String>,
 }
 
 impl CommandPalette {
@@ -22,6 +24,22 @@ impl CommandPalette {
     pub fn search() -> Self {
         Self {
             search_input: true,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn info(text: impl Into<String>) -> Self {
+        Self {
+            info: Some(text.into()),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn prompt(label: impl Into<String>) -> Self {
+        Self {
+            prompt: Some(label.into()),
             ..Self::default()
         }
     }
@@ -73,7 +91,7 @@ impl CommandPalette {
         registry: &CommandRegistry,
         context: &CommandContext,
     ) -> Option<CommandId> {
-        if self.files.is_some() || self.search_input {
+        if self.files.is_some() || self.search_input || self.info.is_some() {
             return None;
         }
         self.results(registry, context, usize::MAX)
@@ -83,6 +101,15 @@ impl CommandPalette {
 
     #[must_use]
     pub fn display_text(&self, registry: &CommandRegistry, context: &CommandContext) -> String {
+        if let Some(info) = &self.info {
+            return format!("{info}\n\n  Enter or Escape to close");
+        }
+        if let Some(prompt) = &self.prompt {
+            return format!(
+                "{prompt}\n> {}\n\n  Enter to confirm · Escape to cancel",
+                self.query
+            );
+        }
         let mut text = format!("> {}\n", self.query);
         if self.search_input {
             text.push_str("  Type a literal query and press Enter\n");
@@ -122,6 +149,16 @@ impl CommandPalette {
     #[must_use]
     pub const fn is_search_input(&self) -> bool {
         self.search_input
+    }
+
+    #[must_use]
+    pub const fn is_info(&self) -> bool {
+        self.info.is_some()
+    }
+
+    #[must_use]
+    pub const fn is_prompt(&self) -> bool {
+        self.prompt.is_some()
     }
 }
 
