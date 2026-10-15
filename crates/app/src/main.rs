@@ -21,6 +21,7 @@ use palette::CommandPalette;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use vanta_commands::{CommandContext, CommandId, CommandRegistry};
 use vanta_file_io::RecoveryJournal;
+use vanta_language::SyntaxDocument;
 use vanta_session::{DocumentState, Session};
 use vanta_workspace::{CancellationToken, Workspace};
 use wgpu::{
@@ -42,7 +43,18 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 const TEXT_COLOR: Color = Color::rgb(220, 223, 228);
+const MUTED_TEXT_COLOR: Color = Color::rgb(157, 166, 181);
 const PADDING: f32 = 20.0;
+const TAB_BAR_HEIGHT: f32 = 36.0;
+const STATUS_BAR_HEIGHT: f32 = 26.0;
+const SIDEBAR_WIDTH: f32 = 240.0;
+const TAB_WIDTH: f32 = 168.0;
+const SIDEBAR_LINE_HEIGHT: f32 = 21.0;
+const SIDEBAR_FILE_LIMIT: usize = 18;
+#[cfg(target_os = "macos")]
+const COMMAND_KEY: &str = "⌘";
+#[cfg(not(target_os = "macos"))]
+const COMMAND_KEY: &str = "Ctrl+";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let initial_path = std::env::args_os().nth(1).map(PathBuf::from);
@@ -234,6 +246,9 @@ struct WindowState {
     text_renderer: TextRenderer,
     overlay_renderer: OverlayRenderer,
     text_buffer: Buffer,
+    tabs_buffer: Buffer,
+    sidebar_buffer: Buffer,
+    status_buffer: Buffer,
     palette_buffer: Buffer,
     ime_buffer: Buffer,
     ime_preedit: String,
@@ -243,6 +258,7 @@ struct WindowState {
     model: EditorModel,
     tabs: Vec<EditorModel>,
     split_view: bool,
+    sidebar_visible: bool,
     search_receiver: Option<Receiver<Vec<PathBuf>>>,
     search_cancellation: Option<CancellationToken>,
     command_registry: CommandRegistry,
@@ -300,21 +316,15 @@ impl WindowState {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let overlay_renderer = OverlayRenderer::new(&device, surface_config.format);
-        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let text_buffer = Buffer::new(&mut font_system, Metrics::new(15.0, 22.0));
+        let tabs_buffer = Buffer::new(&mut font_system, Metrics::new(13.0, 20.0));
+        let sidebar_buffer = Buffer::new(&mut font_system, Metrics::new(13.0, SIDEBAR_LINE_HEIGHT));
+        let status_buffer = Buffer::new(&mut font_system, Metrics::new(12.0, 18.0));
         let mut palette_buffer = Buffer::new(&mut font_system, Metrics::new(15.0, 24.0));
         palette_buffer.set_size(Some(640.0), Some(240.0));
         let mut ime_buffer = Buffer::new(&mut font_system, Metrics::new(15.0, 22.0));
         ime_buffer.set_size(Some(480.0), Some(28.0));
-        Self::update_text_buffer(
-            &mut text_buffer,
-            &mut font_system,
-            &model,
-            size.width,
-            size.height,
-        );
-
-        window.set_visible(true);
-        Ok(Self {
+        let mut state = Self {
             instance,
             device,
             queue,
@@ -327,6 +337,9 @@ impl WindowState {
             text_renderer,
             overlay_renderer,
             text_buffer,
+            tabs_buffer,
+            sidebar_buffer,
+            status_buffer,
             palette_buffer,
             ime_buffer,
             ime_preedit: String::new(),
@@ -336,6 +349,7 @@ impl WindowState {
             model,
             tabs: Vec::new(),
             split_view: false,
+            sidebar_visible: true,
             search_receiver: None,
             search_cancellation: None,
             command_registry: commands::built_in_registry().map_err(|error| error.to_string())?,
@@ -345,7 +359,39 @@ impl WindowState {
             selecting: false,
             accessibility,
             window,
-        })
+        };
+        state.refresh_chrome();
+        state.resize_buffer();
+        state.window.set_visible(true);
+        Ok(state)
+    }
+
+    fn editor_left(&self) -> f32 {
+        if self.sidebar_visible {
+            SIDEBAR_WIDTH + PADDING
+        } else {
+            PADDING
+        }
+    }
+
+    fn editor_top() -> f32 {
+        TAB_BAR_HEIGHT + PADDING
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn editor_size(&self) -> (f32, f32) {
+        let sidebar = if self.sidebar_visible {
+            SIDEBAR_WIDTH
+        } else {
+            0.0
+        };
+        let width = (self.surface_config.width as f32 - sidebar - PADDING * 2.0).max(1.0);
+        let height = (self.surface_config.height as f32
+            - TAB_BAR_HEIGHT
+            - STATUS_BAR_HEIGHT
+            - PADDING * 2.0)
+            .max(1.0);
+        (width, height)
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -359,18 +405,18 @@ impl WindowState {
     }
 
     fn resize_buffer(&mut self) {
-        let editor_width = if self.split_view {
-            self.surface_config.width / 2
-        } else {
-            self.surface_config.width
-        };
+        let (mut width, height) = self.editor_size();
+        if self.split_view {
+            width = (width - PADDING) / 2.0;
+        }
         Self::update_text_buffer(
             &mut self.text_buffer,
             &mut self.font_system,
             &self.model,
-            editor_width,
-            self.surface_config.height,
+            width,
+            height,
         );
+        self.refresh_chrome();
         self.window.request_redraw();
     }
 
@@ -381,20 +427,158 @@ impl WindowState {
         buffer: &mut Buffer,
         font_system: &mut FontSystem,
         model: &EditorModel,
-        width: u32,
-        height: u32,
+        width: f32,
+        height: f32,
     ) {
-        buffer.set_size(
-            Some((width as f32 - PADDING * 2.0).max(1.0)),
-            Some((height as f32 - PADDING * 2.0).max(1.0)),
-        );
-        buffer.set_text(
-            model.text(),
+        buffer.set_size(Some(width.max(1.0)), Some(height.max(1.0)));
+        let base = Attrs::new().family(Family::Monospace);
+        let is_rust = model
+            .path()
+            .and_then(|path| path.extension())
+            .is_some_and(|extension| extension == "rs");
+        if is_rust {
+            let mut syntax = SyntaxDocument::rust(model.text().len()).ok();
+            let highlights = syntax.as_mut().map_or_else(Vec::new, |syntax| {
+                syntax.parse(model.text());
+                syntax.highlight(0, model.text().len())
+            });
+            let mut cursor = 0;
+            let mut rich = Vec::new();
+            for span in highlights {
+                if span.start < cursor || span.end > model.text().len() {
+                    continue;
+                }
+                if span.start > cursor {
+                    rich.push((&model.text()[cursor..span.start], base.clone()));
+                }
+                let color = match span.token {
+                    "comment" => Color::rgb(106, 153, 85),
+                    "string" => Color::rgb(206, 145, 120),
+                    "number" => Color::rgb(181, 206, 168),
+                    "function" => Color::rgb(220, 220, 170),
+                    "type" => Color::rgb(78, 201, 176),
+                    "keyword" => Color::rgb(197, 134, 192),
+                    _ => TEXT_COLOR,
+                };
+                rich.push((
+                    &model.text()[span.start..span.end],
+                    base.clone().color(color),
+                ));
+                cursor = span.end;
+            }
+            if cursor < model.text().len() {
+                rich.push((&model.text()[cursor..], base.clone()));
+            }
+            buffer.set_rich_text(rich, &base, Shaping::Advanced, None);
+        } else {
+            buffer.set_text(model.text(), &base, Shaping::Advanced, None);
+        }
+        buffer.shape_until_scroll(font_system, false);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn refresh_chrome(&mut self) {
+        let mut tabs = format!("●  {}", self.model.display_name());
+        for model in &self.tabs {
+            write!(tabs, "\t{}", model.display_name()).expect("writing to a string cannot fail");
+        }
+        self.tabs_buffer
+            .set_size(Some(self.surface_config.width as f32), Some(TAB_BAR_HEIGHT));
+        self.tabs_buffer.set_text(
+            &tabs,
             &Attrs::new().family(Family::Monospace),
             Shaping::Advanced,
             None,
         );
-        buffer.shape_until_scroll(font_system, false);
+        self.tabs_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        let mut sidebar = if let Some(workspace) = &self.workspace {
+            let root_name = workspace.root().file_name().map_or_else(
+                || workspace.root().display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let mut text = format!("EXPLORER\n{root_name}\n\n");
+            for path in workspace.files().iter().take(SIDEBAR_FILE_LIMIT) {
+                let relative = path.strip_prefix(workspace.root()).unwrap_or(path);
+                writeln!(text, "  {}", relative.display())
+                    .expect("writing to a string cannot fail");
+            }
+            text
+        } else {
+            format!(
+                "EXPLORER\n\nNo folder open\n\n{COMMAND_KEY}Shift+O  Open folder\n{COMMAND_KEY}P        Quick open\n{COMMAND_KEY}Shift+P  Commands"
+            )
+        };
+        let is_rust = self
+            .model
+            .path()
+            .and_then(|path| path.extension())
+            .is_some_and(|extension| extension == "rs");
+        if is_rust && let Ok(mut syntax) = SyntaxDocument::rust(self.model.text().len()) {
+            syntax.parse(self.model.text());
+            let symbols = syntax.outline(self.model.text());
+            if !symbols.is_empty() {
+                sidebar.push_str("\n\nOUTLINE\n");
+                for symbol in symbols.into_iter().take(12) {
+                    writeln!(sidebar, "  ◇ {}", symbol.name)
+                        .expect("writing to a string cannot fail");
+                }
+            }
+        }
+        self.sidebar_buffer.set_size(
+            Some(SIDEBAR_WIDTH - 24.0),
+            Some(self.surface_config.height as f32),
+        );
+        self.sidebar_buffer.set_text(
+            &sidebar,
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
+        self.sidebar_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        let point = self.model.cursor_point();
+        let language = self
+            .model
+            .path()
+            .and_then(|path| path.extension())
+            .and_then(|ext| ext.to_str())
+            .map_or("Plain Text", |ext| match ext {
+                "rs" => "Rust",
+                "js" | "mjs" | "cjs" => "JavaScript",
+                "ts" | "tsx" => "TypeScript",
+                "json" => "JSON",
+                "md" => "Markdown",
+                "toml" => "TOML",
+                "yaml" | "yml" => "YAML",
+                _ => "Plain Text",
+            });
+        let dirty = if self.model.is_dirty() {
+            "Modified  •  "
+        } else {
+            ""
+        };
+        let status = format!(
+            "{dirty}Ln {}, Col {}    UTF-8    {language}    {} tab{}    {COMMAND_KEY}B Explorer",
+            point.line + 1,
+            point.byte_column + 1,
+            self.tabs.len() + 1,
+            if self.tabs.is_empty() { "" } else { "s" }
+        );
+        self.status_buffer.set_size(
+            Some(self.surface_config.width as f32 - 24.0),
+            Some(STATUS_BAR_HEIGHT),
+        );
+        self.status_buffer.set_text(
+            &status,
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
+        self.status_buffer
+            .shape_until_scroll(&mut self.font_system, false);
     }
 
     fn refresh_after_edit(&mut self) {
@@ -468,10 +652,23 @@ impl WindowState {
             return;
         }
         if command_modifier
+            && matches!(key, Key::Character(character) if character.eq_ignore_ascii_case("b"))
+        {
+            self.execute_command(commands::VIEW_TOGGLE_SIDEBAR);
+            return;
+        }
+        if command_modifier
             && self.modifiers.shift_key()
             && matches!(key, Key::Character(character) if character.eq_ignore_ascii_case("s"))
         {
             self.execute_command(commands::FILE_SAVE_AS);
+            return;
+        }
+        if command_modifier
+            && self.modifiers.shift_key()
+            && matches!(key, Key::Character(character) if character.eq_ignore_ascii_case("o"))
+        {
+            self.execute_command(commands::WORKSPACE_OPEN);
             return;
         }
         if command_modifier
@@ -577,6 +774,10 @@ impl WindowState {
                 self.split_view = !self.split_view;
                 self.resize_buffer();
             }
+            commands::VIEW_TOGGLE_SIDEBAR => {
+                self.sidebar_visible = !self.sidebar_visible;
+                self.resize_buffer();
+            }
             commands::FILE_OPEN => self.open_file_dialog(),
             commands::FILE_SAVE_AS => self.save_as_dialog(),
             commands::WORKSPACE_OPEN => self.open_workspace_dialog(),
@@ -614,28 +815,34 @@ impl WindowState {
             }
             commands::EDITOR_MOVE_LEFT => {
                 self.model.move_left(self.modifiers.shift_key());
+                self.refresh_chrome();
                 self.request_redraw();
             }
             commands::EDITOR_MOVE_RIGHT => {
                 self.model.move_right(self.modifiers.shift_key());
+                self.refresh_chrome();
                 self.request_redraw();
             }
             commands::EDITOR_MOVE_UP => {
                 self.model.move_vertical(-1, self.modifiers.shift_key());
+                self.refresh_chrome();
                 self.request_redraw();
             }
             commands::EDITOR_MOVE_DOWN => {
                 self.model.move_vertical(1, self.modifiers.shift_key());
+                self.refresh_chrome();
                 self.request_redraw();
             }
             commands::EDITOR_MOVE_LINE_START => {
                 self.model
                     .move_line_boundary(false, self.modifiers.shift_key());
+                self.refresh_chrome();
                 self.request_redraw();
             }
             commands::EDITOR_MOVE_LINE_END => {
                 self.model
                     .move_line_boundary(true, self.modifiers.shift_key());
+                self.refresh_chrome();
                 self.request_redraw();
             }
             commands::EDITOR_UNDO => match self.model.undo() {
@@ -699,6 +906,16 @@ impl WindowState {
         self.refresh_after_edit();
     }
 
+    fn activate_tab(&mut self, index: usize) {
+        if index == 0 {
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(index - 1) {
+            std::mem::swap(&mut self.model, tab);
+            self.refresh_after_edit();
+        }
+    }
+
     fn open_workspace_dialog(&mut self) {
         let Some(path) = FileDialog::new()
             .set_title("Open a workspace folder")
@@ -709,6 +926,8 @@ impl WindowState {
         match Workspace::open(path) {
             Ok(workspace) => {
                 self.workspace = Some(workspace);
+                self.sidebar_visible = true;
+                self.resize_buffer();
                 self.open_quick_open();
             }
             Err(error) => eprintln!("vanta: failed to index workspace: {error}"),
@@ -1023,20 +1242,59 @@ impl WindowState {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
     fn mouse_button(&mut self, state: ElementState) {
         self.selecting = state == ElementState::Pressed;
-        if self.selecting {
-            if self.modifiers.alt_key() {
-                self.add_cursor();
-            } else {
-                self.place_cursor(self.modifiers.shift_key());
+        if !self.selecting {
+            return;
+        }
+        let (x, y) = self.pointer_position;
+        if y < TAB_BAR_HEIGHT {
+            self.selecting = false;
+            self.activate_tab((x / TAB_WIDTH).floor() as usize);
+            return;
+        }
+        if self.sidebar_visible && x < SIDEBAR_WIDTH {
+            self.selecting = false;
+            let first_file_top = TAB_BAR_HEIGHT + 12.0 + SIDEBAR_LINE_HEIGHT * 3.0;
+            if y >= first_file_top {
+                let index = ((y - first_file_top) / SIDEBAR_LINE_HEIGHT).floor() as usize;
+                if index >= SIDEBAR_FILE_LIMIT {
+                    return;
+                }
+                let relative = self.workspace.as_ref().and_then(|workspace| {
+                    workspace.files().get(index).and_then(|path| {
+                        path.strip_prefix(workspace.root()).ok().map(PathBuf::from)
+                    })
+                });
+                if let Some(relative) = relative {
+                    self.open_workspace_file(&relative);
+                }
             }
+            return;
+        }
+        let bottom = self.surface_config.height as f32 - STATUS_BAR_HEIGHT;
+        if y < Self::editor_top() || y >= bottom || x < self.editor_left() {
+            self.selecting = false;
+            return;
+        }
+        if self.modifiers.alt_key() {
+            self.add_cursor();
+        } else {
+            self.place_cursor(self.modifiers.shift_key());
         }
     }
 
     fn add_cursor(&mut self) {
         let (x, y) = self.pointer_position;
-        let Some(cursor) = self.text_buffer.hit(x - PADDING, y - PADDING) else {
+        let Some(cursor) = self
+            .text_buffer
+            .hit(x - self.editor_left(), y - Self::editor_top())
+        else {
             return;
         };
         if let Err(error) = self.model.add_cursor_point(vanta_document::TextPoint {
@@ -1046,12 +1304,16 @@ impl WindowState {
             eprintln!("vanta: additional cursor rejected: {error}");
         }
         self.selecting = false;
+        self.refresh_chrome();
         self.request_redraw();
     }
 
     fn place_cursor(&mut self, extend: bool) {
         let (x, y) = self.pointer_position;
-        let Some(cursor) = self.text_buffer.hit(x - PADDING, y - PADDING) else {
+        let Some(cursor) = self
+            .text_buffer
+            .hit(x - self.editor_left(), y - Self::editor_top())
+        else {
             return;
         };
         if let Err(error) = self.model.set_cursor_point(
@@ -1063,6 +1325,7 @@ impl WindowState {
         ) {
             eprintln!("vanta: pointer position rejected: {error}");
         }
+        self.refresh_chrome();
         self.request_redraw();
     }
 
@@ -1091,8 +1354,8 @@ impl WindowState {
             .flat_map(|run| {
                 run.highlight(start, end)
                     .map(move |(left, width)| OverlayRect {
-                        left: PADDING + left,
-                        top: PADDING + run.line_top,
+                        left: self.editor_left() + left,
+                        top: Self::editor_top() + run.line_top,
                         width,
                         height: run.line_height,
                     })
@@ -1109,8 +1372,8 @@ impl WindowState {
                     .cursor_position(&Cursor::new(point.line, point.byte_column))
             })
             .map(|(left, top)| OverlayRect {
-                left: PADDING + left,
-                top: PADDING + top,
+                left: self.editor_left() + left,
+                top: Self::editor_top() + top,
                 width: 2.0,
                 height: 22.0,
             })
@@ -1159,12 +1422,55 @@ impl WindowState {
             width: (self.surface_config.width as f32 - 120.0).min(660.0),
             height: 250.0,
         });
-        let split_divider = self.split_view.then(|| OverlayRect {
-            left: self.surface_config.width as f32 / 2.0 - 1.0,
-            top: 0.0,
-            width: 2.0,
-            height: self.surface_config.height as f32,
+        let chrome_rectangles = [
+            OverlayRect {
+                left: 0.0,
+                top: 0.0,
+                width: self.surface_config.width as f32,
+                height: TAB_BAR_HEIGHT,
+            },
+            OverlayRect {
+                left: 0.0,
+                top: self.surface_config.height as f32 - STATUS_BAR_HEIGHT,
+                width: self.surface_config.width as f32,
+                height: STATUS_BAR_HEIGHT,
+            },
+        ];
+        let sidebar_rectangle = self.sidebar_visible.then_some(OverlayRect {
+            left: 0.0,
+            top: TAB_BAR_HEIGHT,
+            width: SIDEBAR_WIDTH,
+            height: self.surface_config.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
         });
+        let (editor_width, _) = self.editor_size();
+        let split_divider = self.split_view.then(|| OverlayRect {
+            left: self.editor_left() + editor_width / 2.0,
+            top: TAB_BAR_HEIGHT,
+            width: 2.0,
+            height: self.surface_config.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
+        });
+        let mut divider_rectangles = vec![
+            OverlayRect {
+                left: 0.0,
+                top: TAB_BAR_HEIGHT - 1.0,
+                width: self.surface_config.width as f32,
+                height: 1.0,
+            },
+            OverlayRect {
+                left: 0.0,
+                top: self.surface_config.height as f32 - STATUS_BAR_HEIGHT,
+                width: self.surface_config.width as f32,
+                height: 1.0,
+            },
+        ];
+        if self.sidebar_visible {
+            divider_rectangles.push(OverlayRect {
+                left: SIDEBAR_WIDTH - 1.0,
+                top: TAB_BAR_HEIGHT,
+                width: 1.0,
+                height: self.surface_config.height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
+            });
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -1187,6 +1493,26 @@ impl WindowState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            self.overlay_renderer.draw_chrome(
+                &mut pass,
+                &chrome_rectangles,
+                self.surface_config.width,
+                self.surface_config.height,
+            );
+            if let Some(rectangle) = sidebar_rectangle {
+                self.overlay_renderer.draw_chrome(
+                    &mut pass,
+                    &[rectangle],
+                    self.surface_config.width,
+                    self.surface_config.height,
+                );
+            }
+            self.overlay_renderer.draw_divider(
+                &mut pass,
+                &divider_rectangles,
+                self.surface_config.width,
+                self.surface_config.height,
+            );
             self.overlay_renderer.draw_selection(
                 &mut pass,
                 &selection_rectangles,
@@ -1202,7 +1528,7 @@ impl WindowState {
                 );
             }
             if let Some(rectangle) = split_divider {
-                self.overlay_renderer.draw_selection(
+                self.overlay_renderer.draw_divider(
                     &mut pass,
                     &[rectangle],
                     self.surface_config.width,
@@ -1230,7 +1556,11 @@ impl WindowState {
         self.atlas.trim();
     }
 
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::too_many_lines
+    )]
     fn prepare_text(&mut self) -> bool {
         self.viewport.update(
             &self.queue,
@@ -1246,36 +1576,82 @@ impl WindowState {
             .flatten();
         let mut areas = vec![TextArea {
             buffer: &self.text_buffer,
-            left: PADDING,
-            top: PADDING,
+            left: self.editor_left(),
+            top: Self::editor_top(),
             scale: 1.0,
             bounds: TextBounds {
                 left: 0,
-                top: 0,
+                top: TAB_BAR_HEIGHT as i32,
                 right,
-                bottom,
+                bottom: bottom - STATUS_BAR_HEIGHT as i32,
             },
             default_color: TEXT_COLOR,
             custom_glyphs: &[],
         }];
         if self.split_view {
-            let midpoint = i32::try_from(self.surface_config.width / 2).unwrap_or(i32::MAX);
+            let (editor_width, _) = self.editor_size();
+            let midpoint_f32 = self.editor_left() + editor_width / 2.0;
+            let midpoint = midpoint_f32 as i32;
             areas[0].bounds.right = midpoint;
             areas.push(TextArea {
                 buffer: &self.text_buffer,
-                left: self.surface_config.width as f32 / 2.0 + PADDING,
-                top: PADDING,
+                left: midpoint_f32 + PADDING,
+                top: Self::editor_top(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: midpoint,
-                    top: 0,
+                    top: TAB_BAR_HEIGHT as i32,
                     right,
-                    bottom,
+                    bottom: bottom - STATUS_BAR_HEIGHT as i32,
                 },
                 default_color: TEXT_COLOR,
                 custom_glyphs: &[],
             });
         }
+        areas.push(TextArea {
+            buffer: &self.tabs_buffer,
+            left: 12.0,
+            top: 7.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right,
+                bottom: TAB_BAR_HEIGHT as i32,
+            },
+            default_color: TEXT_COLOR,
+            custom_glyphs: &[],
+        });
+        if self.sidebar_visible {
+            areas.push(TextArea {
+                buffer: &self.sidebar_buffer,
+                left: 12.0,
+                top: TAB_BAR_HEIGHT + 12.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: TAB_BAR_HEIGHT as i32,
+                    right: SIDEBAR_WIDTH as i32,
+                    bottom: bottom - STATUS_BAR_HEIGHT as i32,
+                },
+                default_color: MUTED_TEXT_COLOR,
+                custom_glyphs: &[],
+            });
+        }
+        areas.push(TextArea {
+            buffer: &self.status_buffer,
+            left: 12.0,
+            top: self.surface_config.height as f32 - STATUS_BAR_HEIGHT + 4.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: bottom - STATUS_BAR_HEIGHT as i32,
+                right,
+                bottom,
+            },
+            default_color: MUTED_TEXT_COLOR,
+            custom_glyphs: &[],
+        });
         if self.palette.is_some() {
             areas.push(TextArea {
                 buffer: &self.palette_buffer,

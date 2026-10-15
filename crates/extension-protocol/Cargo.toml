@@ -1,0 +1,10 @@
+[package]
+name = "vanta-extension-protocol"
+description = "Versioned protocol between Vanta and its extension host"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true

@@ -195,6 +195,19 @@ impl EditorModel {
         }
     }
 
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        let name = self.path.as_deref().and_then(Path::file_name).map_or_else(
+            || "Untitled".into(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        if self.is_dirty() {
+            format!("{name} •")
+        } else {
+            name
+        }
+    }
+
     /// Inserts text at the cursor as one transaction.
     ///
     /// # Errors

@@ -11,6 +11,7 @@ pub const WORKSPACE_QUICK_OPEN: &str = "workspace.quick_open";
 pub const WORKSPACE_SEARCH: &str = "workspace.search";
 pub const WORKBENCH_NEXT_TAB: &str = "workbench.next_tab";
 pub const VIEW_TOGGLE_SPLIT: &str = "view.toggle_split";
+pub const VIEW_TOGGLE_SIDEBAR: &str = "view.toggle_sidebar";
 pub const WORKBENCH_COMMAND_PALETTE: &str = "workbench.command_palette";
 pub const EDITOR_SELECT_ALL: &str = "editor.select_all";
 pub const EDITOR_COPY: &str = "editor.copy";
@@ -59,6 +60,13 @@ pub fn built_in_registry() -> Result<CommandRegistry, CommandError> {
         &mut registry,
         VIEW_TOGGLE_SPLIT,
         "Toggle Split View",
+        "View",
+        CommandTarget::View,
+    )?;
+    register(
+        &mut registry,
+        VIEW_TOGGLE_SIDEBAR,
+        "Toggle File Explorer",
         "View",
         CommandTarget::View,
     )?;
