@@ -63,7 +63,7 @@ Inspect a UTF-8 text file with the headless CLI:
 cargo run -p vanta-cli -- inspect README.md
 ```
 
-Launch the v0.3 desktop editor with a file:
+Launch the v0.4 desktop editor with a file:
 
 ```bash
 cargo run -p vanta -- README.md
@@ -141,6 +141,10 @@ Vanta
 ├── crates/keybindings Context-aware bindings, chords, and conflict inspection
 ├── crates/session     Corruption-tolerant session persistence
 ├── crates/workspace   Folder indexing, quick open, and cancellable search
+├── crates/extension-protocol Versioned bounded extension-host protocol
+├── crates/extension-host Sandboxed out-of-process Wasmtime runtime
+├── crates/language   Incremental parsing, highlighting, folds, and symbols
+├── crates/platform   Cross-platform capability contract
 └── crates/cli        Headless inspection and development harness
 ```
 
@@ -150,8 +154,8 @@ layers replaceable around a stable editing contract.
 
 ## Development status
 
-The project is implementing **v0.3: editing workflow, workspaces, and
-navigation**. The current build includes vertical navigation, selection-aware
+The project is implementing **v0.4: the extension-host prototype and language
+vertical slice**. The editor build includes vertical navigation, selection-aware
 undo/redo, transactional multi-caret insertion, a rendered command palette,
 context-aware keybinding primitives, folder indexing, fuzzy quick open,
 cancellable streaming search, native Open/Save As dialogs, unsaved-close
@@ -166,7 +170,13 @@ v0.3 enforces these reference debug-build budgets in the test suite:
 - Interactive search runs on a cancellable worker and never scans on the input thread.
 
 Advanced split layouts, column-selection polish, extensive theme customization,
-and language-aware editing remain intentionally deferred beyond v0.3.
+and language-server intelligence remain intentionally deferred.
+
+The v0.4 extension boundary includes a separate host executable, bounded and
+versioned framing, Wasmtime fuel and epoch interruption, and memory/instance
+limits. Its language prototype includes an incremental Rust grammar,
+viewport-first syntax output, highlighting tokens, folds, outline symbols,
+large-file cutoffs, and explicit macOS/Windows/Linux capability reporting.
 
 ## Development
 
