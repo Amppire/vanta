@@ -3,17 +3,31 @@ use std::path::{Path, PathBuf};
 
 use unicode_segmentation::UnicodeSegmentation;
 use vanta_document::{ByteOffset, Document, EditOrigin, TextEdit, TextPoint, Transaction};
-use vanta_file_io::{FileIoError, FileState, TextFormat, load_text, save_text_atomic};
+use vanta_file_io::{
+    FileIoError, FileState, RecoveryRecord, TextFormat, load_text, save_text_atomic,
+};
 
 /// Platform-independent state for the first desktop editor window.
 pub struct EditorModel {
     document: Document,
     selection_anchor: ByteOffset,
     cursor: ByteOffset,
+    extra_cursors: Vec<ByteOffset>,
     path: Option<PathBuf>,
     format: TextFormat,
     disk_state: Option<FileState>,
     saved_version: vanta_document::DocumentVersion,
+    preferred_column: Option<usize>,
+    selection_undo: Vec<SelectionHistory>,
+    selection_redo: Vec<SelectionHistory>,
+}
+
+#[derive(Clone)]
+struct SelectionHistory {
+    before: (ByteOffset, ByteOffset),
+    after: (ByteOffset, ByteOffset),
+    extra_before: Vec<ByteOffset>,
+    extra_after: Vec<ByteOffset>,
 }
 
 impl EditorModel {
@@ -25,9 +39,13 @@ impl EditorModel {
             document,
             selection_anchor: ByteOffset(0),
             cursor: ByteOffset(0),
+            extra_cursors: Vec::new(),
             path: None,
             format: TextFormat::default(),
             disk_state: None,
+            preferred_column: None,
+            selection_undo: Vec::new(),
+            selection_redo: Vec::new(),
         }
     }
 
@@ -41,13 +59,60 @@ impl EditorModel {
         let document = Document::new(loaded.text);
         Ok(Self {
             cursor: ByteOffset(0),
+            extra_cursors: Vec::new(),
             selection_anchor: ByteOffset(0),
             saved_version: document.version(),
             document,
             path: Some(path.to_path_buf()),
             format: loaded.format,
             disk_state: Some(loaded.state),
+            preferred_column: None,
+            selection_undo: Vec::new(),
+            selection_redo: Vec::new(),
         })
+    }
+
+    #[must_use]
+    pub fn from_recovery(record: RecoveryRecord) -> Self {
+        let document = Document::new(record.text);
+        Self {
+            cursor: ByteOffset(0),
+            extra_cursors: Vec::new(),
+            selection_anchor: ByteOffset(0),
+            saved_version: vanta_document::DocumentVersion(u64::MAX),
+            document,
+            path: record.source_path.map(PathBuf::from),
+            format: TextFormat {
+                encoding: record.encoding,
+                ..TextFormat::default()
+            },
+            disk_state: None,
+            preferred_column: None,
+            selection_undo: Vec::new(),
+            selection_redo: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn recovery_id(&self) -> String {
+        self.path.as_ref().map_or_else(
+            || "untitled-primary".to_owned(),
+            |path| path.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[must_use]
+    pub fn recovery_record(&self) -> RecoveryRecord {
+        RecoveryRecord {
+            document_id: self.recovery_id(),
+            source_path: self
+                .path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            version: self.document.version().0,
+            encoding: self.format.encoding,
+            text: self.text().to_owned(),
+        }
     }
 
     #[must_use]
@@ -66,6 +131,14 @@ impl EditorModel {
         self.document
             .offset_to_point(self.cursor)
             .expect("the editor cursor must remain on a valid document boundary")
+    }
+
+    #[must_use]
+    pub fn cursor_points(&self) -> Vec<TextPoint> {
+        std::iter::once(self.cursor)
+            .chain(self.extra_cursors.iter().copied())
+            .filter_map(|offset| self.document.offset_to_point(offset).ok())
+            .collect()
     }
 
     #[must_use]
@@ -131,14 +204,39 @@ impl EditorModel {
         if text.is_empty() {
             return Ok(());
         }
+        if !self.extra_cursors.is_empty() && !self.has_selection() {
+            return self.insert_at_cursors(text);
+        }
         let range = self.selection_range().unwrap_or(self.cursor..self.cursor);
         let start = range.start;
         let transaction = Transaction::new(self.document.version(), EditOrigin::User)
             .with_edit(TextEdit::replace(range, text));
-        self.document.apply(transaction)?;
-        self.cursor = ByteOffset(start.0 + text.len());
-        self.selection_anchor = self.cursor;
-        Ok(())
+        let after = ByteOffset(start.0 + text.len());
+        self.apply_edit(transaction, after)
+    }
+
+    fn insert_at_cursors(&mut self, text: &str) -> Result<(), vanta_document::DocumentError> {
+        let mut positions = vec![self.cursor];
+        positions.extend(self.extra_cursors.iter().copied());
+        positions.sort_unstable();
+        positions.dedup();
+        let mut transaction = Transaction::new(self.document.version(), EditOrigin::User);
+        for position in &positions {
+            transaction = transaction.with_edit(TextEdit::insert(*position, text));
+        }
+        let map = |position: ByteOffset| {
+            ByteOffset(
+                position.0
+                    + text.len()
+                        * positions
+                            .iter()
+                            .filter(|candidate| **candidate <= position)
+                            .count(),
+            )
+        };
+        let cursor_after = map(self.cursor);
+        let extras_after = self.extra_cursors.iter().copied().map(map).collect();
+        self.apply_edit_with_cursors(transaction, cursor_after, extras_after)
     }
 
     /// Deletes the extended grapheme immediately before the cursor.
@@ -197,6 +295,7 @@ impl EditorModel {
             .next_back()
             .map_or(ByteOffset(0), |(index, _)| ByteOffset(index));
         self.set_cursor(next, extend);
+        self.preferred_column = None;
     }
 
     pub fn move_right(&mut self, extend: bool) {
@@ -211,11 +310,87 @@ impl EditorModel {
                 ByteOffset(self.cursor.0 + grapheme.len())
             });
         self.set_cursor(next, extend);
+        self.preferred_column = None;
+    }
+
+    pub fn move_vertical(&mut self, line_delta: isize, extend: bool) {
+        let point = self.cursor_point();
+        let preferred = self.preferred_column.unwrap_or(point.byte_column);
+        let last_line = self.text().split('\n').count().saturating_sub(1);
+        let target_line = point.line.saturating_add_signed(line_delta).min(last_line);
+        let target_text = self.text().split('\n').nth(target_line).unwrap_or("");
+        let mut column = preferred.min(target_text.len());
+        while column > 0 && !target_text.is_char_boundary(column) {
+            column -= 1;
+        }
+        if self
+            .set_cursor_point(
+                TextPoint {
+                    line: target_line,
+                    byte_column: column,
+                },
+                extend,
+            )
+            .is_ok()
+        {
+            self.preferred_column = Some(preferred);
+        }
+    }
+
+    pub fn move_line_boundary(&mut self, end: bool, extend: bool) {
+        let point = self.cursor_point();
+        let column = if end {
+            self.text().split('\n').nth(point.line).map_or(0, str::len)
+        } else {
+            0
+        };
+        let _ = self.set_cursor_point(
+            TextPoint {
+                line: point.line,
+                byte_column: column,
+            },
+            extend,
+        );
+        self.preferred_column = None;
+    }
+
+    /// Undoes the last local edit and restores its selection.
+    pub fn undo(&mut self) -> Result<bool, vanta_document::DocumentError> {
+        let Some(history) = self.selection_undo.pop() else {
+            return Ok(false);
+        };
+        if self.document.undo()?.is_none() {
+            return Ok(false);
+        }
+        self.selection_anchor = history.before.0;
+        self.cursor = history.before.1;
+        self.extra_cursors.clone_from(&history.extra_before);
+        self.selection_redo.push(history);
+        self.preferred_column = None;
+        Ok(true)
+    }
+
+    /// Redoes the last undone edit and restores its resulting selection.
+    pub fn redo(&mut self) -> Result<bool, vanta_document::DocumentError> {
+        let Some(history) = self.selection_redo.pop() else {
+            return Ok(false);
+        };
+        if self.document.redo()?.is_none() {
+            return Ok(false);
+        }
+        self.selection_anchor = history.after.0;
+        self.cursor = history.after.1;
+        self.extra_cursors.clone_from(&history.extra_after);
+        self.selection_undo.push(history);
+        self.preferred_column = None;
+        Ok(true)
     }
 
     pub fn select_all(&mut self) {
+        self.extra_cursors.clear();
         self.selection_anchor = ByteOffset(0);
         self.cursor = ByteOffset(self.text().len());
+        self.preferred_column = None;
     }
 
     /// Moves the cursor to a logical text point, optionally extending selection.
@@ -234,6 +409,19 @@ impl EditorModel {
         Ok(())
     }
 
+    /// Adds a caret unless one already exists at the point.
+    pub fn add_cursor_point(
+        &mut self,
+        point: TextPoint,
+    ) -> Result<(), vanta_document::DocumentError> {
+        let offset = self.document.point_to_offset(point)?;
+        if offset != self.cursor && !self.extra_cursors.contains(&offset) {
+            self.extra_cursors.push(offset);
+        }
+        self.selection_anchor = self.cursor;
+        Ok(())
+    }
+
     fn set_cursor(&mut self, offset: ByteOffset, extend: bool) {
         self.cursor = offset;
         if !extend {
@@ -248,9 +436,37 @@ impl EditorModel {
         let start = range.start;
         let transaction = Transaction::new(self.document.version(), EditOrigin::User)
             .with_edit(TextEdit::delete(range));
+        self.apply_edit(transaction, start)
+    }
+
+    fn apply_edit(
+        &mut self,
+        transaction: Transaction,
+        cursor_after: ByteOffset,
+    ) -> Result<(), vanta_document::DocumentError> {
+        self.apply_edit_with_cursors(transaction, cursor_after, Vec::new())
+    }
+
+    fn apply_edit_with_cursors(
+        &mut self,
+        transaction: Transaction,
+        cursor_after: ByteOffset,
+        extras_after: Vec<ByteOffset>,
+    ) -> Result<(), vanta_document::DocumentError> {
+        let before = (self.selection_anchor, self.cursor);
+        let extra_before = self.extra_cursors.clone();
         self.document.apply(transaction)?;
-        self.cursor = start;
-        self.selection_anchor = start;
+        self.cursor = cursor_after;
+        self.selection_anchor = cursor_after;
+        self.extra_cursors.clone_from(&extras_after);
+        self.selection_undo.push(SelectionHistory {
+            before,
+            after: (cursor_after, cursor_after),
+            extra_before,
+            extra_after: extras_after,
+        });
+        self.selection_redo.clear();
+        self.preferred_column = None;
         Ok(())
     }
 
@@ -266,6 +482,24 @@ impl EditorModel {
         self.disk_state = Some(state);
         self.saved_version = self.document.version();
         Ok(())
+    }
+
+    /// Saves to a selected path and makes it the document's backing file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the destination cannot be written safely.
+    pub fn save_as(&mut self, path: &Path) -> Result<(), EditorSaveError> {
+        let state = save_text_atomic(path, self.text(), self.format, None)?;
+        self.path = Some(path.to_path_buf());
+        self.disk_state = Some(state);
+        self.saved_version = self.document.version();
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 }
 
@@ -339,5 +573,110 @@ mod tests {
         editor.insert("draft").unwrap();
         assert!(editor.is_dirty());
         assert!(matches!(editor.save(), Err(EditorSaveError::Untitled)));
+    }
+
+    #[test]
+    fn vertical_movement_preserves_preferred_column() {
+        let mut editor = EditorModel::untitled();
+        editor.insert("abcdef\nx\nabcdef").unwrap();
+        editor.move_line_boundary(false, false);
+        editor.move_vertical(-2, false);
+        editor.move_right(false);
+        editor.move_right(false);
+        editor.move_right(false);
+        editor.move_right(false);
+        editor.move_vertical(1, false);
+        assert_eq!(
+            editor.cursor_point(),
+            TextPoint {
+                line: 1,
+                byte_column: 1
+            }
+        );
+        editor.move_vertical(1, false);
+        assert_eq!(
+            editor.cursor_point(),
+            TextPoint {
+                line: 2,
+                byte_column: 4
+            }
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_restore_text_and_selection() {
+        let mut editor = EditorModel::untitled();
+        editor.insert("hello").unwrap();
+        editor.move_left(true);
+        editor.move_left(true);
+        editor.insert("!").unwrap();
+        assert_eq!(editor.text(), "hel!");
+        assert!(editor.undo().unwrap());
+        assert_eq!(editor.text(), "hello");
+        assert_eq!(editor.selection_range(), Some(ByteOffset(3)..ByteOffset(5)));
+        assert!(editor.redo().unwrap());
+        assert_eq!(editor.text(), "hel!");
+        assert_eq!(editor.cursor(), ByteOffset(4));
+    }
+
+    #[test]
+    fn multi_caret_insert_is_atomic_and_undo_restores_carets() {
+        let mut editor = EditorModel::untitled();
+        editor.insert("ab\ncd").unwrap();
+        editor.move_line_boundary(false, false);
+        editor
+            .add_cursor_point(TextPoint {
+                line: 0,
+                byte_column: 1,
+            })
+            .unwrap();
+        editor.insert("!").unwrap();
+        assert_eq!(editor.text(), "a!b\n!cd");
+        assert_eq!(editor.cursor_points().len(), 2);
+        editor.undo().unwrap();
+        assert_eq!(editor.text(), "ab\ncd");
+        assert_eq!(editor.cursor_points().len(), 2);
+    }
+
+    #[test]
+    fn randomized_multi_caret_insert_matches_string_model() {
+        let mut seed = 0x5eed_u64;
+        for _ in 0..200 {
+            let mut editor = EditorModel::untitled();
+            editor.insert("abcdefghij").unwrap();
+            let mut positions = Vec::new();
+            for _ in 0..4 {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                positions.push(usize::try_from(seed % 11).unwrap());
+            }
+            positions.sort_unstable();
+            positions.dedup();
+            let primary = positions[0];
+            editor
+                .set_cursor_point(
+                    TextPoint {
+                        line: 0,
+                        byte_column: primary,
+                    },
+                    false,
+                )
+                .unwrap();
+            for position in positions.iter().skip(1) {
+                editor
+                    .add_cursor_point(TextPoint {
+                        line: 0,
+                        byte_column: *position,
+                    })
+                    .unwrap();
+            }
+            let mut expected = "abcdefghij".to_owned();
+            for position in positions.iter().rev() {
+                expected.insert(*position, '!');
+            }
+            editor.insert("!").unwrap();
+            assert_eq!(editor.text(), expected);
+            editor.undo().unwrap();
+            assert_eq!(editor.text(), "abcdefghij");
+        }
     }
 }

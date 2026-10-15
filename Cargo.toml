@@ -5,6 +5,9 @@ members = [
     "crates/commands",
     "crates/document",
     "crates/file-io",
+    "crates/keybindings",
+    "crates/session",
+    "crates/workspace",
 ]
 resolver = "3"
 
