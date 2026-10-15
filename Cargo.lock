@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "vanta"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3203,11 +3203,14 @@ dependencies = [
  "glyphon",
  "pollster",
  "rfd",
+ "serde_json",
  "unicode-segmentation",
  "vanta-commands",
+ "vanta-config",
  "vanta-document",
  "vanta-file-io",
  "vanta-language",
+ "vanta-lsp",
  "vanta-session",
  "vanta-workspace",
  "wgpu",
@@ -3216,7 +3219,7 @@ dependencies = [
 
 [[package]]
 name = "vanta-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "vanta-document",
  "vanta-file-io",
@@ -3224,15 +3227,23 @@ dependencies = [
 
 [[package]]
 name = "vanta-commands"
-version = "0.4.0"
+version = "0.5.0"
+
+[[package]]
+name = "vanta-config"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "vanta-document"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "vanta-extension-host"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "vanta-extension-protocol",
  "wasmtime",
@@ -3240,38 +3251,46 @@ dependencies = [
 
 [[package]]
 name = "vanta-extension-protocol"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "vanta-file-io"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "vanta-keybindings"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "vanta-commands",
 ]
 
 [[package]]
 name = "vanta-language"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "tree-sitter",
  "tree-sitter-rust",
 ]
 
 [[package]]
+name = "vanta-lsp"
+version = "0.5.0"
+dependencies = [
+ "serde_json",
+ "vanta-document",
+]
+
+[[package]]
 name = "vanta-platform"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "vanta-session"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "vanta-workspace"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "version_check"

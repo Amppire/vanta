@@ -6,6 +6,7 @@ mod palette;
 
 use std::error::Error;
 use std::fmt::Write as _;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
@@ -20,8 +21,14 @@ use overlay::{OverlayRect, OverlayRenderer};
 use palette::CommandPalette;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use vanta_commands::{CommandContext, CommandId, CommandRegistry};
+use vanta_config::{ExtensionManager, ExtensionPackage, InstallOutcome, Profile, SDK_VERSION};
 use vanta_file_io::RecoveryJournal;
 use vanta_language::SyntaxDocument;
+use vanta_lsp::{
+    BrokeredProcess, Diagnostic, DiagnosticSeverity, DiagnosticStore, LanguageFeature,
+    NativeProcessBroker, RequestTracker, ServerCommand, ServerState, ServerSupervisor,
+    Utf16Position, Utf16Range, VersionedTextEdit, WorkspaceEdit,
+};
 use vanta_session::{DocumentState, Session};
 use vanta_workspace::{CancellationToken, Workspace};
 use wgpu::{
@@ -229,6 +236,7 @@ impl ApplicationHandler for Application {
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.window_state {
             state.poll_workspace_search();
+            state.poll_language_server();
         }
     }
 }
@@ -262,6 +270,18 @@ struct WindowState {
     search_receiver: Option<Receiver<Vec<PathBuf>>>,
     search_cancellation: Option<CancellationToken>,
     command_registry: CommandRegistry,
+    lsp_supervisor: ServerSupervisor,
+    lsp_broker: NativeProcessBroker,
+    lsp_process: Option<BrokeredProcess>,
+    lsp_command: Option<ServerCommand>,
+    lsp_receiver: Option<Receiver<LspEvent>>,
+    lsp_requests: RequestTracker,
+    lsp_log: Vec<String>,
+    lsp_open_uri: Option<String>,
+    diagnostics: DiagnosticStore,
+    extension_manager: ExtensionManager,
+    profile: Profile,
+    pending_prompt: Option<PromptAction>,
     clipboard: Option<arboard::Clipboard>,
     modifiers: ModifiersState,
     pointer_position: (f32, f32),
@@ -270,7 +290,18 @@ struct WindowState {
     window: Arc<Window>,
 }
 
+enum LspEvent {
+    Message(serde_json::Value),
+    Log(String),
+    Closed,
+}
+
+enum PromptAction {
+    Rename,
+}
+
 impl WindowState {
+    #[allow(clippy::too_many_lines)]
     async fn new(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
@@ -353,6 +384,18 @@ impl WindowState {
             search_receiver: None,
             search_cancellation: None,
             command_registry: commands::built_in_registry().map_err(|error| error.to_string())?,
+            lsp_supervisor: ServerSupervisor::default(),
+            lsp_broker: NativeProcessBroker::default(),
+            lsp_process: None,
+            lsp_command: None,
+            lsp_receiver: None,
+            lsp_requests: RequestTracker::default(),
+            lsp_log: Vec::new(),
+            lsp_open_uri: None,
+            diagnostics: DiagnosticStore::default(),
+            extension_manager: ExtensionManager::default(),
+            profile: Profile::empty("Default"),
+            pending_prompt: None,
             clipboard: arboard::Clipboard::new().ok(),
             modifiers: ModifiersState::empty(),
             pointer_position: (PADDING, PADDING),
@@ -476,7 +519,7 @@ impl WindowState {
         buffer.shape_until_scroll(font_system, false);
     }
 
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn refresh_chrome(&mut self) {
         let mut tabs = format!("●  {}", self.model.display_name());
         for model in &self.tabs {
@@ -561,11 +604,17 @@ impl WindowState {
             ""
         };
         let status = format!(
-            "{dirty}Ln {}, Col {}    UTF-8    {language}    {} tab{}    {COMMAND_KEY}B Explorer",
+            "{dirty}Ln {}, Col {}    UTF-8    {language}    {} tab{}    {}    {COMMAND_KEY}B Explorer",
             point.line + 1,
             point.byte_column + 1,
             self.tabs.len() + 1,
-            if self.tabs.is_empty() { "" } else { "s" }
+            if self.tabs.is_empty() { "" } else { "s" },
+            match self.lsp_supervisor.state() {
+                ServerState::Disabled => "LSP Off",
+                ServerState::Stopped => "LSP Ready",
+                ServerState::Running => "LSP Running",
+                ServerState::Failed => "LSP Failed",
+            }
         );
         self.status_buffer.set_size(
             Some(self.surface_config.width as f32 - 24.0),
@@ -601,6 +650,7 @@ impl WindowState {
         } else if let Err(error) = self.recovery_journal.remove(&self.model.recovery_id()) {
             eprintln!("vanta: failed to clear recovery record: {error}");
         }
+        self.sync_language_document(false);
         self.resize_buffer();
     }
 
@@ -655,6 +705,10 @@ impl WindowState {
             && matches!(key, Key::Character(character) if character.eq_ignore_ascii_case("b"))
         {
             self.execute_command(commands::VIEW_TOGGLE_SIDEBAR);
+            return;
+        }
+        if command_modifier && matches!(key, Key::Character(character) if character == " ") {
+            self.execute_command(commands::LANGUAGE_COMPLETION);
             return;
         }
         if command_modifier
@@ -759,6 +813,7 @@ impl WindowState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn execute_command(&mut self, name: &str) {
         let id = CommandId::new(name).expect("built-in command IDs are validated during startup");
         let context =
@@ -787,6 +842,43 @@ impl WindowState {
                 self.palette = Some(CommandPalette::default());
                 self.refresh_palette();
             }
+            commands::LANGUAGE_TOGGLE => self.toggle_language_intelligence(),
+            commands::LANGUAGE_CONFIGURE => self.configure_language_server(),
+            commands::LANGUAGE_COMPLETION => {
+                self.request_language_feature(LanguageFeature::Completion);
+            }
+            commands::LANGUAGE_HOVER => self.request_language_feature(LanguageFeature::Hover),
+            commands::LANGUAGE_DEFINITION => {
+                self.request_language_feature(LanguageFeature::Definition);
+            }
+            commands::LANGUAGE_REFERENCES => {
+                self.request_language_feature(LanguageFeature::References);
+            }
+            commands::LANGUAGE_DOCUMENT_SYMBOLS => {
+                self.request_language_feature(LanguageFeature::DocumentSymbols);
+            }
+            commands::LANGUAGE_WORKSPACE_SYMBOLS => {
+                self.request_language_feature(LanguageFeature::WorkspaceSymbols);
+            }
+            commands::LANGUAGE_RENAME => {
+                self.pending_prompt = Some(PromptAction::Rename);
+                self.palette = Some(CommandPalette::prompt("RENAME SYMBOL"));
+                self.refresh_palette();
+            }
+            commands::LANGUAGE_FORMAT => {
+                self.request_language_feature(LanguageFeature::Formatting);
+            }
+            commands::LANGUAGE_CODE_ACTIONS => {
+                self.request_language_feature(LanguageFeature::CodeActions);
+            }
+            commands::LANGUAGE_SHOW_STATUS => self.show_language_status(),
+            commands::LANGUAGE_SHOW_PROBLEMS => self.show_problems(),
+            commands::EXTENSIONS_INSPECT => self.inspect_extensions(),
+            commands::EXTENSIONS_INSTALL_OFFLINE => self.install_offline_extension(),
+            commands::EXTENSIONS_TOGGLE => self.toggle_extension(),
+            commands::EXTENSIONS_ROLLBACK => self.rollback_extension(),
+            commands::PROFILE_EXPORT => self.export_profile(),
+            commands::PROFILE_IMPORT => self.import_profile(),
             commands::FILE_SAVE => match self.model.save() {
                 Ok(()) => self.refresh_after_edit(),
                 Err(editor::EditorSaveError::Untitled) => self.save_as_dialog(),
@@ -877,6 +969,775 @@ impl WindowState {
         match self.model.save_as(&path) {
             Ok(()) => self.refresh_after_edit(),
             Err(error) => eprintln!("vanta: save as failed: {error}"),
+        }
+    }
+
+    fn show_info(&mut self, text: impl Into<String>) {
+        self.palette = Some(CommandPalette::info(text));
+        self.refresh_palette();
+    }
+
+    fn toggle_language_intelligence(&mut self) {
+        if self.lsp_supervisor.state() == ServerState::Running {
+            let result = self
+                .lsp_process
+                .as_mut()
+                .map_or(Ok(()), |process| self.lsp_supervisor.disable(Some(process)));
+            if let Err(error) = result {
+                self.show_info(format!("LANGUAGE INTELLIGENCE\n\nFailed to stop: {error}"));
+                return;
+            }
+            self.lsp_process = None;
+            self.lsp_receiver = None;
+            self.lsp_open_uri = None;
+            self.lsp_requests.cancel_all();
+            self.diagnostics.clear();
+            self.show_info("LANGUAGE INTELLIGENCE\n\nDisabled. Diagnostics cleared; no server process remains.");
+        } else if self.lsp_command.is_some() {
+            self.lsp_supervisor.enable();
+            self.start_language_server();
+        } else {
+            self.configure_language_server();
+        }
+        self.refresh_chrome();
+    }
+
+    fn configure_language_server(&mut self) {
+        let Some(workspace_root) = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.root().to_path_buf())
+        else {
+            self.show_info(
+                "LANGUAGE SERVER CONFIGURATION\n\nOpen a workspace folder before selecting a server executable.",
+            );
+            return;
+        };
+        let Some(executable) = FileDialog::new()
+            .set_title("Select a language server executable")
+            .pick_file()
+        else {
+            return;
+        };
+        let trusted = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("Trust this workspace and executable?")
+            .set_description(format!(
+                "Workspace: {}\nExecutable: {}\n\nThe process will run without inherited secrets or environment variables.",
+                workspace_root.display(),
+                executable.display()
+            ))
+            .set_buttons(MessageButtons::YesNo)
+            .show();
+        if trusted != MessageDialogResult::Yes {
+            self.show_info("LANGUAGE SERVER CONFIGURATION\n\nNo executable was approved.");
+            return;
+        }
+        self.lsp_broker.set_workspace_trusted(true);
+        self.lsp_broker.approvals_mut().approve(&executable);
+        self.lsp_command = Some(ServerCommand {
+            executable,
+            arguments: Vec::new(),
+            working_directory: workspace_root,
+        });
+        self.lsp_supervisor.enable();
+        self.start_language_server();
+    }
+
+    fn start_language_server(&mut self) {
+        let Some(command) = self.lsp_command.clone() else {
+            return;
+        };
+        let mut process = match self.lsp_broker.spawn(&command) {
+            Ok(process) => process,
+            Err(error) => {
+                self.lsp_log.push(format!("launch failed: {error}"));
+                self.show_info(format!("LANGUAGE SERVER FAILED\n\n{error}"));
+                return;
+            }
+        };
+        let Some(stdout) = process.take_stdout() else {
+            self.show_info("LANGUAGE SERVER FAILED\n\nServer stdout was unavailable.");
+            return;
+        };
+        let stderr = process.take_stderr();
+        let (sender, receiver) = mpsc::channel();
+        let output_sender = sender.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                match vanta_lsp::read_message(&mut reader) {
+                    Ok(message) => {
+                        if output_sender.send(LspEvent::Message(message)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = output_sender.send(LspEvent::Log(error.to_string()));
+                        let _ = output_sender.send(LspEvent::Closed);
+                        return;
+                    }
+                }
+            }
+        });
+        if let Some(stderr) = stderr {
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if sender.send(LspEvent::Log(line)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        let root_uri = format!("file://{}", command.working_directory.to_string_lossy());
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "processId": std::process::id(),
+                "rootUri": root_uri,
+                "capabilities": {
+                    "textDocument": {
+                        "synchronization": { "didSave": true },
+                        "completion": {},
+                        "hover": {}
+                    },
+                    "workspace": { "workspaceEdit": { "documentChanges": true } }
+                }
+            }
+        });
+        if let Some(stdin) = process.stdin()
+            && let Err(error) = vanta_lsp::write_message(stdin, &initialize)
+        {
+            self.show_info(format!("LANGUAGE SERVER FAILED\n\n{error}"));
+            return;
+        }
+        self.lsp_log.push(format!("started pid {}", process.id()));
+        self.lsp_receiver = Some(receiver);
+        self.lsp_process = Some(process);
+        self.lsp_supervisor.mark_running();
+        self.show_info(
+            "LANGUAGE SERVER STARTED\n\nInitializing in the background. Editing remains available.",
+        );
+        self.refresh_chrome();
+    }
+
+    fn request_language_feature(&mut self, feature: LanguageFeature) {
+        self.request_language_feature_with_argument(feature, None);
+    }
+
+    fn request_language_feature_with_argument(
+        &mut self,
+        feature: LanguageFeature,
+        argument: Option<&str>,
+    ) {
+        if self.lsp_supervisor.state() != ServerState::Running {
+            self.show_info(
+                "LANGUAGE INTELLIGENCE\n\nNo server is running. Use “Configure Language Server Executable” first.",
+            );
+            return;
+        }
+        let Some(path) = self.model.path() else {
+            self.show_info(
+                "LANGUAGE INTELLIGENCE\n\nSave the document before requesting language features.",
+            );
+            return;
+        };
+        let uri = format!("file://{}", path.to_string_lossy());
+        let position = match vanta_lsp::offset_to_utf16(self.model.text(), self.model.cursor()) {
+            Ok(position) => position,
+            Err(error) => {
+                self.show_info(format!("LANGUAGE REQUEST FAILED\n\n{error}"));
+                return;
+            }
+        };
+        let method = match feature {
+            LanguageFeature::Completion => "textDocument/completion",
+            LanguageFeature::Hover => "textDocument/hover",
+            LanguageFeature::Definition => "textDocument/definition",
+            LanguageFeature::References => "textDocument/references",
+            LanguageFeature::DocumentSymbols => "textDocument/documentSymbol",
+            LanguageFeature::WorkspaceSymbols => "workspace/symbol",
+            LanguageFeature::Rename => "textDocument/rename",
+            LanguageFeature::Formatting => "textDocument/formatting",
+            LanguageFeature::CodeActions => "textDocument/codeAction",
+            LanguageFeature::Diagnostics => return,
+        };
+        let text_document = serde_json::json!({ "uri": uri });
+        let lsp_position = serde_json::json!({
+            "line": position.line,
+            "character": position.character
+        });
+        let params = match feature {
+            LanguageFeature::DocumentSymbols => {
+                serde_json::json!({ "textDocument": text_document })
+            }
+            LanguageFeature::WorkspaceSymbols => serde_json::json!({ "query": "" }),
+            LanguageFeature::References => serde_json::json!({
+                "textDocument": text_document,
+                "position": lsp_position,
+                "context": { "includeDeclaration": true }
+            }),
+            LanguageFeature::Rename => serde_json::json!({
+                "textDocument": text_document,
+                "position": lsp_position,
+                "newName": argument.unwrap_or_default()
+            }),
+            LanguageFeature::Formatting => serde_json::json!({
+                "textDocument": text_document,
+                "options": { "tabSize": 4, "insertSpaces": true }
+            }),
+            LanguageFeature::CodeActions => serde_json::json!({
+                "textDocument": text_document,
+                "range": { "start": lsp_position.clone(), "end": lsp_position },
+                "context": { "diagnostics": [] }
+            }),
+            _ => serde_json::json!({
+                "textDocument": text_document,
+                "position": lsp_position
+            }),
+        };
+        let request = self.lsp_requests.begin(feature, self.model.version());
+        let message = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request.id,
+            "method": method,
+            "params": params
+        });
+        let result = self
+            .lsp_process
+            .as_mut()
+            .and_then(BrokeredProcess::stdin)
+            .ok_or("server input is unavailable")
+            .and_then(|stdin| {
+                vanta_lsp::write_message(stdin, &message).map_err(|_| "request write failed")
+            });
+        if let Err(error) = result {
+            self.lsp_requests.cancel(request.id);
+            self.show_info(format!("LANGUAGE REQUEST FAILED\n\n{error}"));
+        }
+    }
+
+    fn show_language_status(&mut self) {
+        let state = match self.lsp_supervisor.state() {
+            ServerState::Disabled => "Disabled",
+            ServerState::Stopped => "Ready; no process running",
+            ServerState::Running => "Running",
+            ServerState::Failed => "Stopped after restart limit",
+        };
+        let resource = self.lsp_process.as_ref().map_or_else(
+            || "Process: none".to_owned(),
+            |process| {
+                format!(
+                    "Process: pid {}  elapsed {:.1?}",
+                    process.id(),
+                    process.elapsed()
+                )
+            },
+        );
+        let recent_logs =
+            self.lsp_log
+                .iter()
+                .rev()
+                .take(4)
+                .rev()
+                .fold(String::new(), |mut output, line| {
+                    write!(output, "\n  {line}").expect("writing to a string cannot fail");
+                    output
+                });
+        self.show_info(format!(
+            "LANGUAGE SERVER STATUS\n\nState: {state}\n{resource}\nWorkspace execution: explicit trust required\nExecutable launch: explicit approval required\nRestart limit: 3 per minute\nRecent log:{recent_logs}"
+        ));
+    }
+
+    fn poll_language_server(&mut self) {
+        let events: Vec<_> = self
+            .lsp_receiver
+            .as_ref()
+            .map_or_else(Vec::new, |receiver| receiver.try_iter().collect());
+        let mut closed = false;
+        for event in events {
+            match event {
+                LspEvent::Message(message) => self.handle_language_message(&message),
+                LspEvent::Log(message) => {
+                    self.lsp_log.push(message);
+                    if self.lsp_log.len() > 100 {
+                        self.lsp_log.remove(0);
+                    }
+                }
+                LspEvent::Closed => closed = true,
+            }
+        }
+        if closed {
+            self.lsp_process = None;
+            self.lsp_receiver = None;
+            self.lsp_open_uri = None;
+            self.lsp_requests.cancel_all();
+            self.diagnostics.clear();
+            if self.lsp_supervisor.allow_restart(std::time::Instant::now()) {
+                self.lsp_log.push("server stopped; restarting".to_owned());
+                self.start_language_server();
+            } else {
+                self.show_info(
+                    "LANGUAGE SERVER FAILED\n\nRestart limit reached. Editing remains available; language intelligence is stopped.",
+                );
+                self.refresh_chrome();
+            }
+        }
+    }
+
+    fn handle_language_message(&mut self, message: &serde_json::Value) {
+        if message.get("method").and_then(serde_json::Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            self.publish_diagnostics(message);
+            return;
+        }
+        let Some(id) = message.get("id").and_then(serde_json::Value::as_u64) else {
+            return;
+        };
+        if id == 0 {
+            self.finish_language_initialization();
+            return;
+        }
+        let Some(request) = self.lsp_requests.take_if_current(id, self.model.version()) else {
+            self.lsp_log.push(format!("discarded stale response {id}"));
+            return;
+        };
+        let null = serde_json::Value::Null;
+        let result = message.get("result").unwrap_or(&null);
+        match request.feature {
+            LanguageFeature::Completion => {
+                let items = result
+                    .as_array()
+                    .or_else(|| result.get("items").and_then(serde_json::Value::as_array));
+                let labels: Vec<_> = items
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("label").and_then(serde_json::Value::as_str))
+                    .take(8)
+                    .collect();
+                if labels.is_empty() {
+                    self.show_info("COMPLETIONS\n\nNo completion items returned.");
+                } else {
+                    self.show_info(format!("COMPLETIONS\n\n  {}", labels.join("\n  ")));
+                }
+            }
+            LanguageFeature::Hover => {
+                let contents = result.get("contents").unwrap_or(result);
+                let text = contents
+                    .as_str()
+                    .or_else(|| contents.get("value").and_then(serde_json::Value::as_str))
+                    .unwrap_or("No hover information returned.");
+                self.show_info(format!("HOVER\n\n{text}"));
+            }
+            LanguageFeature::Formatting | LanguageFeature::Rename => {
+                self.apply_language_edits(request.document_version, result);
+            }
+            LanguageFeature::CodeActions => {
+                let titles: Vec<_> = result
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("title").and_then(serde_json::Value::as_str))
+                    .take(8)
+                    .collect();
+                self.show_info(if titles.is_empty() {
+                    "CODE ACTIONS\n\nNo actions available.".to_owned()
+                } else {
+                    format!("CODE ACTIONS\n\n  {}", titles.join("\n  "))
+                });
+            }
+            _ => {
+                let rendered =
+                    serde_json::to_string_pretty(result).unwrap_or_else(|_| "No result".to_owned());
+                let rendered: String = rendered.chars().take(2_000).collect();
+                self.show_info(format!("LANGUAGE RESPONSE\n\n{rendered}"));
+            }
+        }
+    }
+
+    fn apply_language_edits(
+        &mut self,
+        document_version: vanta_document::DocumentVersion,
+        result: &serde_json::Value,
+    ) {
+        let Some(path) = self.model.path() else {
+            return;
+        };
+        let uri = format!("file://{}", path.to_string_lossy());
+        let edits = result.as_array().or_else(|| {
+            result
+                .get("changes")
+                .and_then(|changes| changes.get(&uri))
+                .and_then(serde_json::Value::as_array)
+        });
+        let Some(edits) = edits else {
+            self.show_info(
+                "WORKSPACE EDIT PREVIEW\n\nThe server returned a multi-document or unsupported edit. Nothing was changed.",
+            );
+            return;
+        };
+        let edits: Vec<_> = edits
+            .iter()
+            .filter_map(|edit| {
+                let range = edit.get("range")?;
+                Some(VersionedTextEdit {
+                    range: Utf16Range {
+                        start: Self::decode_position(range.get("start")?)?,
+                        end: Self::decode_position(range.get("end")?)?,
+                    },
+                    new_text: edit.get("newText")?.as_str()?.to_owned(),
+                })
+            })
+            .collect();
+        let edit = WorkspaceEdit {
+            document_version,
+            edits,
+        };
+        match vanta_lsp::workspace_edit_transaction(
+            self.model.text(),
+            self.model.version(),
+            edit,
+            "language-server",
+        )
+        .and_then(|transaction| {
+            self.model
+                .apply_external_transaction(transaction)
+                .map_err(|error| vanta_lsp::LspError::Process(error.to_string()))
+        }) {
+            Ok(()) => {
+                self.refresh_after_edit();
+                self.show_info(
+                    "WORKSPACE EDIT APPLIED\n\nThe current document was updated atomically.",
+                );
+            }
+            Err(error) => self.show_info(format!(
+                "WORKSPACE EDIT REJECTED\n\n{error}\nThe document was not changed."
+            )),
+        }
+    }
+
+    fn finish_language_initialization(&mut self) {
+        let initialized = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        });
+        let sent = self
+            .lsp_process
+            .as_mut()
+            .and_then(BrokeredProcess::stdin)
+            .is_some_and(|stdin| vanta_lsp::write_message(stdin, &initialized).is_ok());
+        if !sent {
+            return;
+        }
+        self.lsp_open_uri = None;
+        self.sync_language_document(true);
+        self.lsp_log.push("initialized".to_owned());
+        self.refresh_chrome();
+    }
+
+    fn sync_language_document(&mut self, force_open: bool) {
+        if self.lsp_supervisor.state() != ServerState::Running {
+            return;
+        }
+        let current = self.model.path().map(|path| {
+            let language_id = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("plaintext")
+                .to_owned();
+            (
+                format!("file://{}", path.to_string_lossy()),
+                language_id,
+                self.model.version().0,
+                self.model.text().to_owned(),
+            )
+        });
+        let document_changed = self.lsp_open_uri.as_ref() != current.as_ref().map(|item| &item.0);
+        let mut messages = Vec::new();
+        if (force_open || document_changed)
+            && let Some(previous) = &self.lsp_open_uri
+        {
+            messages.push(serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didClose",
+                "params": { "textDocument": { "uri": previous } }
+            }));
+        }
+        if let Some((uri, language_id, version, text)) = &current {
+            if force_open || document_changed {
+                messages.push(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": version,
+                            "text": text
+                        }
+                    }
+                }));
+            } else {
+                messages.push(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }]
+                    }
+                }));
+            }
+        }
+        if let Some(stdin) = self.lsp_process.as_mut().and_then(BrokeredProcess::stdin) {
+            for message in &messages {
+                if let Err(error) = vanta_lsp::write_message(stdin, message) {
+                    self.lsp_log.push(format!("document sync failed: {error}"));
+                    break;
+                }
+            }
+        }
+        self.lsp_open_uri = current.map(|item| item.0);
+    }
+
+    fn publish_diagnostics(&mut self, message: &serde_json::Value) {
+        let Some(params) = message.get("params") else {
+            return;
+        };
+        let Some(uri) = params.get("uri").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let Some(version) = params.get("version").and_then(serde_json::Value::as_u64) else {
+            self.lsp_log
+                .push("discarded unversioned diagnostics".to_owned());
+            return;
+        };
+        let diagnostics = params
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Self::decode_diagnostic)
+            .collect();
+        let published = vanta_document::DocumentVersion(version);
+        if !self
+            .diagnostics
+            .publish(uri, published, self.model.version(), diagnostics)
+        {
+            self.lsp_log
+                .push(format!("discarded stale diagnostics v{version}"));
+        }
+    }
+
+    fn decode_diagnostic(value: &serde_json::Value) -> Option<Diagnostic> {
+        let range = value.get("range")?;
+        let severity = match value
+            .get("severity")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(3)
+        {
+            1 => DiagnosticSeverity::Error,
+            2 => DiagnosticSeverity::Warning,
+            4 => DiagnosticSeverity::Hint,
+            _ => DiagnosticSeverity::Information,
+        };
+        Some(Diagnostic {
+            range: Utf16Range {
+                start: Self::decode_position(range.get("start")?)?,
+                end: Self::decode_position(range.get("end")?)?,
+            },
+            severity,
+            message: value.get("message")?.as_str()?.to_owned(),
+            source: value
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        })
+    }
+
+    fn decode_position(value: &serde_json::Value) -> Option<Utf16Position> {
+        Some(Utf16Position {
+            line: usize::try_from(value.get("line")?.as_u64()?).ok()?,
+            character: usize::try_from(value.get("character")?.as_u64()?).ok()?,
+        })
+    }
+
+    fn show_problems(&mut self) {
+        let uri = self.model.path().map_or_else(
+            || "untitled".to_owned(),
+            |path| format!("file://{}", path.to_string_lossy()),
+        );
+        let diagnostics = self.diagnostics.for_document(&uri);
+        let mut text = format!(
+            "PROBLEMS\n\n{} problem(s) for {uri}\nDocument version: {}",
+            diagnostics.len(),
+            self.model.version().0
+        );
+        for diagnostic in diagnostics.iter().take(8) {
+            write!(
+                text,
+                "\n  {:?}  {}:{}  {}",
+                diagnostic.severity,
+                diagnostic.range.start.line + 1,
+                diagnostic.range.start.character + 1,
+                diagnostic.message
+            )
+            .expect("writing to a string cannot fail");
+        }
+        self.show_info(text);
+    }
+
+    fn inspect_extensions(&mut self) {
+        let installed: Vec<_> = self.extension_manager.installed().collect();
+        let mut text = format!(
+            "EXTENSIONS AND PERMISSIONS\n\nSDK: {}.{}\n{} extension(s) installed offline",
+            SDK_VERSION.major,
+            SDK_VERSION.minor,
+            installed.len()
+        );
+        for (id, extension) in installed.into_iter().take(8) {
+            write!(
+                text,
+                "\n  {id} {}  {}  {:?}",
+                extension.active.version,
+                if extension.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                extension.approved_permissions
+            )
+            .expect("writing to a string cannot fail");
+        }
+        self.show_info(text);
+    }
+
+    fn install_offline_extension(&mut self) {
+        let Some(path) = FileDialog::new()
+            .set_title("Install offline Vanta extension manifest")
+            .add_filter("Vanta extension manifest", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let package = match ExtensionPackage::from_manifest(&path) {
+            Ok(package) => package,
+            Err(error) => {
+                self.show_info(format!("EXTENSION INSTALL FAILED\n\n{error}"));
+                return;
+            }
+        };
+        let package_id = package.id.clone();
+        let package_version = package.version.clone();
+        match self.extension_manager.install(package.clone()) {
+            Ok(InstallOutcome::Installed) => self.show_info(format!(
+                "EXTENSION INSTALLED\n\n{package_id} {package_version}\nPermissions: {:?}",
+                package.permissions
+            )),
+            Ok(InstallOutcome::Updated) => self.show_info(format!(
+                "EXTENSION UPDATED\n\n{package_id} {package_version}\nPrevious package retained for rollback."
+            )),
+            Ok(InstallOutcome::PermissionApprovalRequired(expansion)) => {
+                let approved = MessageDialog::new()
+                    .set_level(MessageLevel::Warning)
+                    .set_title("Extension requests additional permissions")
+                    .set_description(format!(
+                        "{package_id} requests: {expansion:?}\nApprove this update?"
+                    ))
+                    .set_buttons(MessageButtons::YesNo)
+                    .show();
+                if approved == MessageDialogResult::Yes {
+                    match self.extension_manager.approve_update(package) {
+                        Ok(()) => self.show_info(format!(
+                            "EXTENSION UPDATED\n\n{package_id} {package_version}\nAdditional permissions approved."
+                        )),
+                        Err(error) => {
+                            self.show_info(format!("EXTENSION UPDATE FAILED\n\n{error}"));
+                        }
+                    }
+                } else {
+                    self.show_info("EXTENSION UPDATE CANCELLED\n\nThe existing package was not changed.");
+                }
+            }
+            Err(error) => self.show_info(format!("EXTENSION INSTALL FAILED\n\n{error}")),
+        }
+    }
+
+    fn toggle_extension(&mut self) {
+        let selected = self
+            .extension_manager
+            .installed()
+            .next()
+            .map(|(id, extension)| (id.to_owned(), extension.enabled));
+        let Some((id, enabled)) = selected else {
+            self.show_info("EXTENSIONS\n\nNo extension is installed.");
+            return;
+        };
+        match self.extension_manager.set_enabled(&id, !enabled) {
+            Ok(()) => self.show_info(format!(
+                "EXTENSION {}\n\n{id}",
+                if enabled { "DISABLED" } else { "ENABLED" }
+            )),
+            Err(error) => self.show_info(format!("EXTENSION UPDATE FAILED\n\n{error}")),
+        }
+    }
+
+    fn rollback_extension(&mut self) {
+        let id = self
+            .extension_manager
+            .installed()
+            .next()
+            .map(|(id, _)| id.to_owned());
+        let Some(id) = id else {
+            self.show_info("EXTENSIONS\n\nNo extension is installed.");
+            return;
+        };
+        match self.extension_manager.rollback(&id) {
+            Ok(()) => self.show_info(format!("EXTENSION ROLLED BACK\n\n{id}")),
+            Err(error) => self.show_info(format!("EXTENSION ROLLBACK FAILED\n\n{error}")),
+        }
+    }
+
+    fn export_profile(&mut self) {
+        let Some(path) = FileDialog::new()
+            .set_title("Export Vanta profile")
+            .set_file_name("vanta-profile.json")
+            .save_file()
+        else {
+            return;
+        };
+        match self.profile.export().and_then(|source| {
+            std::fs::write(&path, source)
+                .map_err(|error| vanta_config::ConfigError::Io(error.to_string()))
+        }) {
+            Ok(()) => self.show_info(format!("PROFILE EXPORTED\n\n{}", path.display())),
+            Err(error) => self.show_info(format!("PROFILE EXPORT FAILED\n\n{error}")),
+        }
+    }
+
+    fn import_profile(&mut self) {
+        let Some(path) = FileDialog::new()
+            .set_title("Import Vanta profile")
+            .add_filter("Vanta profile", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let imported = std::fs::read_to_string(&path)
+            .map_err(|error| vanta_config::ConfigError::Io(error.to_string()))
+            .and_then(|source| Profile::import(&source));
+        match imported {
+            Ok(profile) => {
+                let name = profile.name.clone();
+                self.profile = profile;
+                self.show_info(format!(
+                    "PROFILE IMPORTED\n\n{name}\nNo secrets were present."
+                ));
+            }
+            Err(error) => self.show_info(format!("PROFILE IMPORT FAILED\n\n{error}")),
         }
     }
 
@@ -1113,7 +1974,55 @@ impl WindowState {
         CommandContext::default().with_flag("editor.has_selection", self.model.has_selection())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn palette_input(&mut self, key: &Key, text: Option<&str>) {
+        if self.palette.as_ref().is_some_and(CommandPalette::is_info) {
+            if matches!(key, Key::Named(NamedKey::Escape | NamedKey::Enter)) {
+                self.palette = None;
+                self.request_redraw();
+            }
+            return;
+        }
+        if self.palette.as_ref().is_some_and(CommandPalette::is_prompt) {
+            match key {
+                Key::Named(NamedKey::Escape) => {
+                    self.palette = None;
+                    self.pending_prompt = None;
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let value = self
+                        .palette
+                        .as_ref()
+                        .map_or_else(String::new, |palette| palette.query().trim().to_owned());
+                    let action = self.pending_prompt.take();
+                    self.palette = None;
+                    if !value.is_empty() && matches!(action, Some(PromptAction::Rename)) {
+                        self.request_language_feature_with_argument(
+                            LanguageFeature::Rename,
+                            Some(&value),
+                        );
+                    } else {
+                        self.request_redraw();
+                    }
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(palette) = &mut self.palette {
+                        palette.backspace();
+                    }
+                    self.refresh_palette();
+                }
+                _ => {
+                    if let Some(value) = text.filter(|value| !value.chars().any(char::is_control))
+                        && let Some(palette) = &mut self.palette
+                    {
+                        palette.insert(value);
+                    }
+                    self.refresh_palette();
+                }
+            }
+            return;
+        }
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.palette = None;
