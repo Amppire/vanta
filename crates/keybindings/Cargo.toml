@@ -1,0 +1,13 @@
+[package]
+name = "vanta-keybindings"
+description = "Context-aware keybinding resolution for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+vanta-commands = { path = "../commands" }
+
+[lints]
+workspace = true

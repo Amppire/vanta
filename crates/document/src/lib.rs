@@ -782,4 +782,20 @@ mod tests {
         assert_eq!(document.text(), original);
         assert!(document.undo().unwrap().is_none());
     }
+
+    #[test]
+    fn edit_latency_budget_handles_one_thousand_transactions() {
+        let started = std::time::Instant::now();
+        let mut document = Document::new(String::new());
+        for index in 0..1_000 {
+            let transaction = Transaction::new(document.version(), EditOrigin::User).with_edit(
+                TextEdit::insert(ByteOffset(document.text().len()), format!("{index}\n")),
+            );
+            document.apply(transaction).unwrap();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "1,000 edits exceeded the two-second debug-build budget"
+        );
+    }
 }
