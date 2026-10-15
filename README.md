@@ -11,8 +11,8 @@
 
 > [!IMPORTANT]
 > Vanta is under active development. The document and file-safety foundation is
-> functional, and v0.3 begins the editing-workflow layer on top of the native
-> GPU editor. The application remains experimental and intentionally incomplete.
+> functional, and the v0.5 development line now includes optional language-
+> intelligence and SDK-hardening foundations. The application remains experimental.
 
 ## Why Vanta?
 
@@ -45,7 +45,10 @@ Vanta starts with those failure modes instead of treating them as later polish.
 | **Desktop** | Native winit/wgpu/glyphon window, keyboard and IME input, grapheme editing, mouse/drag selection, scrolling, clipboard, dirty state, and conflict-aware save |
 | **Rendering** | GPU text plus caret/selection overlays, shaped-text hit-testing, resize and scale-factor handling, and surface recovery |
 | **Commands** | Stable IDs, metadata, contextual enablement, deterministic palette search, and built-in editor command dispatch |
-| **Correctness** | 24 deterministic and randomized tests covering edits, Unicode boundaries, history, saves, conflicts, recovery, editor state, and commands |
+| **Language intelligence** | Optional LSP lifecycle, strict UTF-16 conversion, versioned diagnostics and edits, bounded JSON-RPC, and trust-gated native process launch |
+| **Extensions** | Sandboxed WebAssembly host, explicit permissions, bounded declarative views, offline package metadata, disable/reload, update approval, and rollback |
+| **Profiles** | Secret-free import/export of settings, keybindings, themes, and extension selections |
+| **Correctness** | Deterministic and randomized tests covering edits, Unicode boundaries, history, saves, conflicts, recovery, LSP synchronization, profiles, and SDK compatibility |
 
 ## Quick start
 
@@ -63,7 +66,7 @@ Inspect a UTF-8 text file with the headless CLI:
 cargo run -p vanta-cli -- inspect README.md
 ```
 
-Launch the v0.4 desktop editor with a file:
+Launch the v0.5 desktop editor with a file:
 
 ```bash
 cargo run -p vanta -- README.md
@@ -89,11 +92,14 @@ cargo run -p vanta
 | Mouse wheel / trackpad | Scroll the text viewport |
 | `Cmd+A/C/X/V` / `Ctrl+A/C/X/V` | Select all, copy, cut, or paste |
 | `Cmd+S` / `Ctrl+S` | Save an existing file if it has not changed externally |
+| `Cmd+Shift+P` / `Ctrl+Shift+P` | Open commands, including language, problems, extensions, and profiles |
+| `Cmd+B` / `Ctrl+B` | Toggle the file explorer |
+| `Cmd+Shift+O` / `Ctrl+Shift+O` | Open a workspace folder |
 
-Vertical movement, undo/redo commands, file dialogs, Save As, IME preedit
-display, accessibility semantics, and unsaved-close confirmation are not yet
-wired into the desktop UI. An untitled buffer therefore cannot currently be
-saved.
+Tabs, workspace files, the status bar, Rust syntax and outline data, language
+status, problems, extension permissions, and portable profiles are wired into
+the desktop UI. Language servers remain disabled until explicitly enabled and
+still require workspace trust plus executable approval before process launch.
 
 ## How the core works
 
@@ -144,6 +150,8 @@ Vanta
 ├── crates/extension-protocol Versioned bounded extension-host protocol
 ├── crates/extension-host Sandboxed out-of-process Wasmtime runtime
 ├── crates/language   Incremental parsing, highlighting, folds, and symbols
+├── crates/lsp        LSP framing, UTF-16 sync, version safety, and process broker
+├── crates/config     Portable profiles and offline extension lifecycle
 ├── crates/platform   Cross-platform capability contract
 └── crates/cli        Headless inspection and development harness
 ```
@@ -154,8 +162,8 @@ layers replaceable around a stable editing contract.
 
 ## Development status
 
-The project is implementing **v0.4: the extension-host prototype and language
-vertical slice**. The editor build includes vertical navigation, selection-aware
+The project is implementing the **v0.5 development line: optional language
+intelligence and SDK hardening**. The editor build includes vertical navigation, selection-aware
 undo/redo, transactional multi-caret insertion, a rendered command palette,
 context-aware keybinding primitives, folder indexing, fuzzy quick open,
 cancellable streaming search, native Open/Save As dialogs, unsaved-close
@@ -172,11 +180,17 @@ v0.3 enforces these reference debug-build budgets in the test suite:
 Advanced split layouts, column-selection polish, extensive theme customization,
 and language-server intelligence remain intentionally deferred.
 
-The v0.4 extension boundary includes a separate host executable, bounded and
+The extension boundary includes a separate host executable, bounded and
 versioned framing, Wasmtime fuel and epoch interruption, and memory/instance
 limits. Its language prototype includes an incremental Rust grammar,
 viewport-first syntax output, highlighting tokens, folds, outline symbols,
 large-file cutoffs, and explicit macOS/Windows/Linux capability reporting.
+
+The v0.5 foundations add bounded LSP JSON-RPC framing, exact UTF-8/UTF-16
+conversion, cancellable versioned feature requests, stale diagnostic and edit
+rejection, restart budgets, explicit workspace trust and executable approval,
+secret-free reproducible profiles, previous-SDK compatibility, bounded
+declarative views, permission-expansion approval, and extension rollback.
 
 ## Development
 
