@@ -1,0 +1,9 @@
+[package]
+name = "vanta-platform"
+description = "Desktop platform capability boundary for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+[lints]
+workspace = true
