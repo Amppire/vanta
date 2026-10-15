@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, Write};
-use vanta_extension_protocol::Request;
+use vanta_extension_protocol::{LifecycleAction, Request};
 use wasmtime::{Config, Engine, Instance, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 struct HostState {
@@ -21,6 +21,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Request::Cancel { id }) => {
                 engine.increment_epoch();
                 println!("1\tok\t{id}\tcancelled");
+            }
+            Ok(Request::Lifecycle {
+                id,
+                extension,
+                action,
+            }) => {
+                let status = match action {
+                    LifecycleAction::Disable => "disabled",
+                    LifecycleAction::Reload => "reloaded",
+                    LifecycleAction::Inspect => "ready",
+                };
+                println!("1\tok\t{id}\t{extension}:{status}");
             }
             Ok(Request::Shutdown) => break,
             Err(error) => println!("1\terror\t0\t{error}"),
