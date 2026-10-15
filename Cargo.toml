@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+unicode-segmentation = "=1.13.3"
 
 [lints.rust]
 unsafe_code = "forbid"
