@@ -16,6 +16,7 @@ rfd = "0.17.2"
 unicode-segmentation = "1.13.0"
 vanta-document = { path = "../document" }
 vanta-file-io = { path = "../file-io" }
+vanta-language = { path = "../language" }
 vanta-workspace = { path = "../workspace" }
 vanta-session = { path = "../session" }
 vanta-commands = { path = "../commands" }

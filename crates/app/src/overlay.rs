@@ -25,6 +25,16 @@ fn selection() -> @location(0) vec4<f32> {
 fn caret() -> @location(0) vec4<f32> {
     return vec4<f32>(0.88, 0.90, 0.94, 1.0);
 }
+
+@fragment
+fn chrome() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.065, 0.078, 0.102, 1.0);
+}
+
+@fragment
+fn divider() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.18, 0.21, 0.27, 1.0);
+}
 ";
 
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +48,8 @@ pub struct OverlayRect {
 pub struct OverlayRenderer {
     selection: RenderPipeline,
     caret: RenderPipeline,
+    chrome: RenderPipeline,
+    divider: RenderPipeline,
 }
 
 impl OverlayRenderer {
@@ -82,7 +94,41 @@ impl OverlayRenderer {
         Self {
             selection: create("Vanta selection pipeline", "selection"),
             caret: create("Vanta caret pipeline", "caret"),
+            chrome: create("Vanta chrome pipeline", "chrome"),
+            divider: create("Vanta divider pipeline", "divider"),
         }
+    }
+
+    pub fn draw_chrome<'pass>(
+        &'pass self,
+        pass: &mut RenderPass<'pass>,
+        rectangles: &[OverlayRect],
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        Self::draw(
+            pass,
+            &self.chrome,
+            rectangles,
+            surface_width,
+            surface_height,
+        );
+    }
+
+    pub fn draw_divider<'pass>(
+        &'pass self,
+        pass: &mut RenderPass<'pass>,
+        rectangles: &[OverlayRect],
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        Self::draw(
+            pass,
+            &self.divider,
+            rectangles,
+            surface_width,
+            surface_height,
+        );
     }
 
     pub fn draw_selection<'pass>(
