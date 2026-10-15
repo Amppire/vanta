@@ -1,0 +1,10 @@
+[package]
+name = "vanta-workspace"
+description = "Workspace indexing and cancellable search for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
