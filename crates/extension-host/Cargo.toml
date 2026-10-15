@@ -1,0 +1,14 @@
+[package]
+name = "vanta-extension-host"
+description = "Sandboxed out-of-process WASM extension host for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+vanta-extension-protocol = { path = "../extension-protocol" }
+wasmtime = { version = "49.0.3", default-features = false, features = ["runtime", "cranelift", "wat"] }
+
+[lints]
+workspace = true
