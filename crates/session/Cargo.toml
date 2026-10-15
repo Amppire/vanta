@@ -1,0 +1,10 @@
+[package]
+name = "vanta-session"
+description = "Corruption-tolerant session persistence for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
