@@ -1,0 +1,14 @@
+[package]
+name = "vanta-language"
+description = "Incremental syntax services and language-pack boundary for Vanta"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+tree-sitter = "0.27.1"
+tree-sitter-rust = "0.24.2"
+
+[lints]
+workspace = true
