@@ -138,6 +138,9 @@ Vanta
 ├── crates/commands   Command identities, metadata, enablement, and discovery
 ├── crates/document   Versioned text model and transaction semantics
 ├── crates/file-io    Safe loading, conflict-aware saves, and recovery journals
+├── crates/keybindings Context-aware bindings, chords, and conflict inspection
+├── crates/session     Corruption-tolerant session persistence
+├── crates/workspace   Folder indexing, quick open, and cancellable search
 └── crates/cli        Headless inspection and development harness
 ```
 
@@ -148,12 +151,22 @@ layers replaceable around a stable editing contract.
 ## Development status
 
 The project is implementing **v0.3: editing workflow, workspaces, and
-navigation**. The current priorities are:
+navigation**. The current build includes vertical navigation, selection-aware
+undo/redo, transactional multi-caret insertion, a rendered command palette,
+context-aware keybinding primitives, folder indexing, fuzzy quick open,
+cancellable streaming search, native Open/Save As dialogs, unsaved-close
+confirmation, visible IME preedit, asynchronous workspace search, basic tabs and
+split views, checksummed crash recovery, session restoration, and a native
+AccessKit accessibility tree.
 
-1. Add a command palette and configurable, context-aware keybindings.
-2. Implement workspace folders, file discovery, ignore rules, and quick open.
-3. Add vertical navigation, undo/redo dispatch, sessions, and split panes.
-4. Complete file dialogs, recovery lifecycle, accessibility, and IME preedit.
+v0.3 enforces these reference debug-build budgets in the test suite:
+
+- 1,000 sequential document transactions complete within 2 seconds.
+- Indexing and literal-searching a 500-file workspace completes within 5 seconds.
+- Interactive search runs on a cancellable worker and never scans on the input thread.
+
+Advanced split layouts, column-selection polish, extensive theme customization,
+and language-aware editing remain intentionally deferred beyond v0.3.
 
 ## Development
 
