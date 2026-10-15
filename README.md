@@ -32,12 +32,15 @@ release infrastructure, or speculative service boundaries yet.
 
 ## Run
 
-Vanta currently opens the new GPUI application shell:
+Open a UTF-8 file:
 
 ```sh
-cargo run
+cargo run -- README.md
 ```
 
-The previous implementation and its design archive remain available on the
-`codex/archive-pre-rewrite-2026-10-24` branch.
+The first vertical slice supports native text and IME input, grapheme-aware
+navigation and deletion, mouse and keyboard selection, clipboard operations,
+scrolling, and conflict-aware atomic saving with `Cmd+S` or `Ctrl+S`.
+
+Crash recovery and accessibility validation are the next acceptance gates.
 
